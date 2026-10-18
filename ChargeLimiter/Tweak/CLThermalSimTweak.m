@@ -21,6 +21,9 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 #include <stdarg.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
 #import <notify.h>
 #import <IOKit/IOKitLib.h>
 
@@ -38,9 +41,7 @@ static int CLTSSessionToken = -1;
 // Mikasa 同款：强引用捕获，无 dealloc hook。
 static id CLTSCurrentProduct = nil;
 
-#pragma mark - 执行端日志（App 可读，判断注入是否成立）
-
-// thermalmonitord 以 root 运行，日志落在 /var/mobile 下，App 经 daemon 读取。
+#pragma mark - 执行端日志（App 可读，判断注入是否成立）// thermalmonitord 以 root 运行，日志落在 /var/mobile 下，App 经 daemon 读取。
 // 上限 16KB，超出保留最近 8KB——执行端只在注入/应用时写，量很小。
 static void CLTSLog(NSString *fmt, ...) {
     static NSString *path = nil;
@@ -77,6 +78,58 @@ static void CLTSLog(NSString *fmt, ...) {
                 writeToFile:path atomically:YES];
         }
     }
+}
+
+#pragma mark - 类发现探针（iOS 16 定位替代 API，一次性）
+
+// CommonProduct 在 iOS 16.6 的 thermalmonitord 里不存在——Powercuff 那条
+// putDeviceInThermalSimulationMode: 路走不通。这里把进程内所有类 + 方法枚举一遍，
+// 把名字/方法命中有温度、充电、产品、限流语义的类打印出来，据此定位新原语。
+static void CLTSProbeClasses(void) {
+    static NSString *marker = nil;
+    static dispatch_once_t once2;
+    dispatch_once(&once2, ^{
+        marker = @"/var/mobile/Library/Logs/JysCharge/.probe_done";
+    });
+    if ([[NSFileManager defaultManager] fileExistsAtPath:marker]) return; // 只探一次
+    [@"probe" writeToFile:marker atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+
+    int count = objc_getClassList(NULL, 0);
+    if (count <= 0) { CLTSLog(@"[probe] no classes"); return; }
+    Class *classes = (Class *)malloc(sizeof(Class) * (unsigned)count);
+    count = objc_getClassList(classes, count);
+    static const char *nameKw[] = {"Product", "Thermal", "Charger", "Inflow", "Mitigation", "Battery"};
+    static const char *selKw[] = {"ThermalSimulation", "thermalSimulation", "SimulationMode",
+                                  "ChargerInhibit", "setCharger", "ChargeInhibit", "Inflow"};
+    int hits = 0;
+    for (int i = 0; i < count && hits < 300; i++) {
+        Class cls = classes[i];
+        const char *cn = class_getName(cls);
+        if (!cn) continue;
+        BOOL nameMatch = NO;
+        for (unsigned k = 0; k < sizeof(nameKw)/sizeof(*nameKw); k++)
+            if (strstr(cn, nameKw[k])) { nameMatch = YES; break; }
+        unsigned int mc = 0;
+        Method *methods = class_copyMethodList(cls, &mc);
+        char selbuf[1500]; selbuf[0] = 0; int off = 0;
+        for (unsigned int j = 0; j < mc; j++) {
+            const char *sn = sel_getName(method_getName(methods[j]));
+            for (unsigned k = 0; k < sizeof(selKw)/sizeof(*selKw); k++) {
+                if (strstr(sn, selKw[k])) {
+                    if (off < (int)sizeof(selbuf) - 64)
+                        off += snprintf(selbuf + off, sizeof(selbuf) - off, "%s ", sn);
+                    break;
+                }
+            }
+        }
+        free(methods);
+        if (nameMatch || selbuf[0]) {
+            hits++;
+            CLTSLog(@"[probe] %s%s%s", cn, selbuf[0] ? " :: " : "", selbuf[0] ? selbuf : "(no matching sel)");
+        }
+    }
+    free(classes);
+    CLTSLog(@"[probe] done, %d hits", hits);
 }
 
 #pragma mark - 档位编码（Powercuff 编码）
@@ -328,6 +381,8 @@ __attribute__((constructor)) static void CLTSInit(void) {
         Class productClass = objc_getClass("CommonProduct");
         NSLog(@"[CLThermalSim] ctor loaded productClass=%@", productClass != nil ? @"yes" : @"no");
         CLTSLog(@"[ctor] loaded, CommonProduct=%@", productClass != nil ? @"yes" : @"no");
+        // 16.6 缺 CommonProduct：枚举类找替代 API（只探一次）。
+        if (productClass == nil) CLTSProbeClasses();
         if (productClass != nil) { // 类缺失（系统变更）：静默退回
             CLTSHookSelector(productClass, @selector(initProduct:), (IMP)CLTSInitProductOverride, &CLTSOrigInitProduct);
             // 捕获卫生（break98pl）：产品对象释放时清捕获，防僵尸下发
