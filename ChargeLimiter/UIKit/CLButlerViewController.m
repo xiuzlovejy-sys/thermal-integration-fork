@@ -96,11 +96,18 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
 // 用户正在拖动/刚提交：2 秒内不用远端值回填，避免"松手弹回"（轮询与用户操作竞争）。
 @property (nonatomic, assign) BOOL userEditing;
 @property (nonatomic, assign) NSTimeInterval lastUserWriteTs;
+// 主开关自愈只尝试一次，避免与 daemon 状态形成写循环。
+@property (nonatomic, assign) BOOL masterFixAttempted;
+// 容量键同步只做一次：历史版本里 charge_above 可能因 -403 没写进去，
+// 与界面显示的 jy_max_percent 不一致（设置 84% 却按 80% 停充）。
+@property (nonatomic, assign) BOOL capacitySynced;
 // 保存结果反馈：写入被拒绝时不能静默装作成功。
 @property (nonatomic, strong) UILabel *statusLabel;
 
 // 显式声明（避免"方法定义在使用之后"的实例方法解析差异，编译更稳）
 - (void)refresh;
+- (void)ensureMasterEnabled;
+- (void)syncCapacityKeys;
 - (void)renderBattery;
 - (void)renderLevel;
 - (void)renderSettings;
@@ -412,6 +419,8 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
         NSDictionary *data = [response[@"data"] isKindOfClass:[NSDictionary class]] ? response[@"data"] : nil;
         if (data) {
             weakSelf.conf = data;
+            [weakSelf ensureMasterEnabled];
+            [weakSelf syncCapacityKeys];
             [weakSelf renderSettings];
             [weakSelf renderLevel];
         }
@@ -485,9 +494,38 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
     self.levelDot.backgroundColor = color;
 }
 
+// 主开关自愈：温控开着但 daemon 处于 master-off 时，所有上游键（charge_above /
+// charge_below）都会被 -403 拒绝，而且 governor 在 !g_enable 时直接不执行——
+// 表现就是"设置存不住 + 温度再高也不降功率"。这里主动把主开关拉起来。
+- (void)ensureMasterEnabled {
+    if (self.masterFixAttempted) return;
+    BOOL masterOn = [self boolFromConf:@"enable" fallback:YES];
+    BOOL thermalOn = [self boolFromConf:@"jy_thermal_enabled" fallback:YES];
+    if (masterOn || !thermalOn) return;
+    self.masterFixAttempted = YES;
+    [self writeKey:@"enable" value:@YES];
+    [self showStatus:@"后台服务未开启，已自动启用" ok:YES];
+    NSLog(@"[Jy] daemon master switch was off -> re-enabled");
+}
+
+// 容量键同步（一次性）：界面认 jy_max_percent，上游状态机认 charge_above/below。
+// 老版本因 -403 可能只写进了前者，导致"显示 84% 却按 80% 停充"。
+- (void)syncCapacityKeys {
+    if (self.capacitySynced) return;
+    if (![self boolFromConf:@"enable" fallback:YES]) return;   // 主开关没开时写也没用
+    NSInteger wanted = [self intFromConf:@"jy_max_percent" fallback:-1];
+    if (wanted < 0) return;
+    NSInteger current = [self intFromConf:@"charge_above" fallback:80];
+    if (wanted == current) { self.capacitySynced = YES; return; }
+    self.capacitySynced = YES;
+    [self writeKey:@"charge_above" value:@(wanted)];
+    [self writeKey:@"charge_below" value:@(MAX(20, wanted - 5))];
+    NSLog(@"[Jy] capacity keys re-synced: charge_above %ld -> %ld", (long)current, (long)wanted);
+}
+
 - (void)renderSettings {
     if (self.applyingRemoteValues) return;
-    // 用户正在拖动、或刚提交不到 2 秒：不回填远端值。轮询是 2 秒一次，
+    // 用户正在拖动、或刚提交不到 2 秒：不回填远端值。轮询 2 秒一次，
     // 若不放行，松手瞬间就会被上一轮 get_conf 的旧值拉回去（表现为"弹回默认"）。
     NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
     if (self.userEditing || (now - self.lastUserWriteTs) < 2.0) return;
