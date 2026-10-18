@@ -86,7 +86,8 @@ def wiring_guard():
     project = (ROOT / 'ChargeLimiter.xcodeproj/project.pbxproj').read_text()
 
     allowed = (
-        re.compile(r'#import\s+"ChargeLimiter/OfflineAdvisory/CLOfflineAdvisory\.h"'),
+        # daemon.mm 在 ChargeLimiter/ 下，接线 import 用同目录相对路径。
+        re.compile(r'#import\s+"(?:ChargeLimiter/)?OfflineAdvisory/CLOfflineAdvisory\.h"'),
         re.compile(r'observeBattery:'),
         re.compile(r'^\s*//'),
     )
@@ -100,7 +101,7 @@ def wiring_guard():
         if 'dvisory' in args or 'observeBattery' in args:
             raise AssertionError('advisory result leaked into applyChargePolicy')
 
-    assert '#import "ChargeLimiter/OfflineAdvisory/CLThermalGovernor.h"' in daemon, \
+    assert re.search(r'#import\s+"(?:ChargeLimiter/)?OfflineAdvisory/CLThermalGovernor\.h"', daemon), \
         'daemon.mm missing governor import'
     assert 'evaluateBattery:' in daemon, 'daemon.mm missing governor evaluateBattery call'
 

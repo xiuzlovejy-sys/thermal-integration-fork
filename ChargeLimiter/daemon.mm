@@ -23,8 +23,11 @@ int main(int argc, char** argv) {
 #include <mach/mach_time.h>
 
 #import "CLSimpleHTTPServer.h"
-#import "ChargeLimiter/OfflineAdvisory/CLOfflineAdvisory.h"
-#import "ChargeLimiter/OfflineAdvisory/CLThermalGovernor.h"
+// 相对路径：daemon.mm 自身在 ChargeLimiter/ 下，写成 "ChargeLimiter/..." 会
+// 解析成 ChargeLimiter/ChargeLimiter/...（Xcode 不保证把 $(SRCROOT) 放进头文件
+// 搜索路径）。同目录相对引用是唯一稳的写法。
+#import "OfflineAdvisory/CLOfflineAdvisory.h"
+#import "OfflineAdvisory/CLThermalGovernor.h"
 
 #include "utils.h"
 

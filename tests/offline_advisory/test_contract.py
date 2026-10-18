@@ -22,8 +22,8 @@ class OfflineContract(unittest.TestCase):
         d = DAEMON.read_text()
         p = PROJECT.read_text()
         g = (ROOT / 'ChargeLimiter/OfflineAdvisory/CLThermalGovernor.mm').read_text()
-        self.assertIn('#import "ChargeLimiter/OfflineAdvisory/CLOfflineAdvisory.h"', d)
-        self.assertIn('#import "ChargeLimiter/OfflineAdvisory/CLThermalGovernor.h"', d)
+        self.assertRegex(d, r'#import "(?:ChargeLimiter/)?OfflineAdvisory/CLOfflineAdvisory\.h"')
+        self.assertRegex(d, r'#import "(?:ChargeLimiter/)?OfflineAdvisory/CLThermalGovernor\.h"')
         self.assertIn('evaluateBattery:', d)
         self.assertIn('observeBattery:', g)
         for m in re.finditer(r'applyChargePolicy\s*\(([^;]*?)\)\s*;', d, re.S):
