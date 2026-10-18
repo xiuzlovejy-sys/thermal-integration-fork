@@ -86,23 +86,28 @@ static void CLTSLog(NSString *fmt, ...) {
 // putDeviceInThermalSimulationMode: 路走不通。这里把进程内所有类 + 方法枚举一遍，
 // 把名字/方法命中有温度、充电、产品、限流语义的类打印出来，据此定位新原语。
 static void CLTSProbeClasses(void) {
-    static NSString *marker = nil;
-    static dispatch_once_t once2;
-    dispatch_once(&once2, ^{
-        marker = @"/var/mobile/Library/Logs/JysCharge/.probe_done";
-    });
-    if ([[NSFileManager defaultManager] fileExistsAtPath:marker]) return; // 只探一次
+    // 只在 thermalmonitord 里跑（SpringBoard 的 UI 类列表是噪音，无诊断价值）。
+    NSString *proc = [NSProcessInfo processInfo].processName ?: @"";
+    if (![proc isEqualToString:@"thermalmonitord"]) return;
+
+    // 标记按进程区分：不同进程各探一次，避免跨进程抢占（上一版 SpringBoard 抢先
+    // 写掉全局标记，thermalmonitord 的探针被跳过）。
+    NSString *marker = [NSString stringWithFormat:
+        @"/var/mobile/Library/Logs/JysCharge/.probe_done.%d", getpid()];
+    if ([[NSFileManager defaultManager] fileExistsAtPath:marker]) return;
     [@"probe" writeToFile:marker atomically:YES encoding:NSUTF8StringEncoding error:NULL];
 
     int count = objc_getClassList(NULL, 0);
     if (count <= 0) { CLTSLog(@"[probe] no classes"); return; }
     Class *classes = (Class *)malloc(sizeof(Class) * (unsigned)count);
     count = objc_getClassList(classes, count);
-    static const char *nameKw[] = {"Product", "Thermal", "Charger", "Inflow", "Mitigation", "Battery"};
+    static const char *nameKw[] = {"Thermal", "Therm", "Mitigation", "Charger",
+                                   "Inflow", "Nominal", "Context", "ClientType", "Hotspot"};
     static const char *selKw[] = {"ThermalSimulation", "thermalSimulation", "SimulationMode",
-                                  "ChargerInhibit", "setCharger", "ChargeInhibit", "Inflow"};
+                                  "ChargerInhibit", "setCharger", "ChargeInhibit", "Inflow",
+                                  "thermal", "setThermal", "ChargeLimit", "Charging"};
     int hits = 0;
-    for (int i = 0; i < count && hits < 300; i++) {
+    for (int i = 0; i < count && hits < 400; i++) {
         Class cls = classes[i];
         const char *cn = class_getName(cls);
         if (!cn) continue;
@@ -129,7 +134,7 @@ static void CLTSProbeClasses(void) {
         }
     }
     free(classes);
-    CLTSLog(@"[probe] done, %d hits", hits);
+    CLTSLog(@"[probe] done, %d hits (proc=%@ pid=%d)", hits, proc, getpid());
 }
 
 #pragma mark - 档位编码（Powercuff 编码）
