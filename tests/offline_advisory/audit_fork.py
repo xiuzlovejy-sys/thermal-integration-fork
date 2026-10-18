@@ -25,7 +25,9 @@ ALLOW = ('ChargeLimiter/OfflineAdvisory/', 'tests/offline_advisory/',
 
 
 def digest(path):
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    # 行尾归一：上游仓库 CRLF/LF 混排，本地 tar 解压、CI git clone、runner git 配置
+    # 之间的行尾差异不承载语义，归一后再哈希，只守卫真实内容差异。
+    return hashlib.sha256(path.read_bytes().replace(b'\r\n', b'\n')).hexdigest()
 
 
 def allowed(rel):

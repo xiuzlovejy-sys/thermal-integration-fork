@@ -43,7 +43,7 @@ jobs:
                   endian = '>'
               else:
                   raise AssertionError(f'{path}: not a 64-bit Mach-O (magic={magic.hex()})')
-              _, cputype, cpusub = struct.unpack(endian + 'III', data[4:16])
+              cputype, cpusub = struct.unpack(endian + 'II', data[4:12])
               return cputype, cpusub
 
           ct, cs = macho('probe-arm64e.o')
@@ -107,7 +107,9 @@ jobs:
           set -euo pipefail
           # --roothide-only: 只构建 ChargeLimiter roothide scheme + Package_roothide,
           # 不触发 rootful/rootless/TIPA 构建（交接文档第五节要求）。
-          ./scripts/build_packages.sh --roothide-only
+          # 用 bash 调用而非 ./：交接导致 git index 丢了可执行位（100644），
+          # CI checkout 后直接 ./ 会 Permission denied。
+          bash scripts/build_packages.sh --roothide-only
 
       - name: "Verify deb contents: arm64e ABI caps 0x80 on every Mach-O"
         run: |
@@ -132,7 +134,7 @@ jobs:
           bad = 0
           for p in sorted(targets):
               with open(p, 'rb') as f:
-                  _, cputype, cpusub = struct.unpack('<III', f.read(16)[4:16])
+                  cputype, cpusub = struct.unpack('<II', f.read(16)[4:12])
               caps = (cpusub >> 24) & 0xFF
               sub = cpusub & 0xFFFFFF
               ok = cputype == 0x0100000C and sub == 2 and caps == 0x80

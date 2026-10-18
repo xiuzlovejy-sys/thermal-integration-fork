@@ -60,7 +60,7 @@ jobs:
         env:
           ITERS: ${{ inputs.iters || '20000' }}
         run: |
-          ./tests/run_repro.sh "${ITERS}" | tee /tmp/repro.log
+          bash tests/run_repro.sh "${ITERS}" | tee /tmp/repro.log
 
       - name: Gate — 加锁修复必须保持干净
         run: |

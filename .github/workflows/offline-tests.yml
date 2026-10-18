@@ -59,6 +59,14 @@ jobs:
           # .git 历史必然不同，会被审计脚本算成 changed_upstream；基准须为纯工作树
           # （与本地 tar 解压基准同形状，本地 PASS 即此形状）。
           rm -rf /tmp/upstream/.git
+          # 诊断：若行尾归一后仍报 changed，这几行给出 runner 侧真相
+          echo "--- git eol/crlf config ---"
+          git config --get core.autocrlf || echo "(autocrlf unset)"
+          git config --global --list 2>/dev/null | grep -iE 'crlf|eol|attributes' || echo "(no global crlf/eol/attrs)"
+          echo "--- line-ending probe ---"
+          xxd /tmp/upstream/ChargeLimiter/common.h | sed -n 2p || true
+          xxd ChargeLimiter/common.h | sed -n 2p || true
+          git check-attr text -- ChargeLimiter/common.h || true
           THERMAL_REVIEW_BASE=/tmp/upstream \
             python3 tests/offline_advisory/audit_fork.py
 
