@@ -11,11 +11,28 @@ DAEMON = ROOT / 'ChargeLimiter/daemon.mm'
 PROJECT = ROOT / 'ChargeLimiter.xcodeproj/project.pbxproj'
 
 class OfflineContract(unittest.TestCase):
-    def test_fork_is_unwired(self):
-        for p in (DAEMON, PROJECT):
-            self.assertNotIn('CLOfflineAdvisory', p.read_text())
-        self.assertNotIn('thermal_policy.c', PROJECT.read_text())
-        self.assertNotIn('native_capacity.c', PROJECT.read_text())
+    def test_fork_is_wired_readonly(self):
+        """2026-10-18 接线后演进（取代 test_fork_is_unwired）。
+
+        INTEGRATION_OFFLINE.md "Precise later hook" 落地：daemon 侧只读观察桥。
+        允许：import + observeBattery 调用；禁止：actuator 路径与 app 侧注册。
+        v2（柔性温控）：daemon 经 CLThermalGovernor 决策，observeBattery 移居
+        governor.mm；daemon.mm 持 import governor.h + evaluateBattery: 调用。
+        """
+        d = DAEMON.read_text()
+        p = PROJECT.read_text()
+        g = (ROOT / 'ChargeLimiter/OfflineAdvisory/CLThermalGovernor.mm').read_text()
+        self.assertIn('#import "ChargeLimiter/OfflineAdvisory/CLOfflineAdvisory.h"', d)
+        self.assertIn('#import "ChargeLimiter/OfflineAdvisory/CLThermalGovernor.h"', d)
+        self.assertIn('evaluateBattery:', d)
+        self.assertIn('observeBattery:', g)
+        for m in re.finditer(r'applyChargePolicy\s*\(([^;]*?)\)\s*;', d, re.S):
+            args = m.group(1)
+            self.assertNotIn('dvisory', args)
+            self.assertNotIn('observeBattery', args)
+        for f in ('thermal_policy.c', 'native_capacity.c', 'temperature_stop.c',
+                  'triple_advisory.c', 'CLOfflineAdvisory.mm', 'CLThermalGovernor.mm'):
+            self.assertIn(f, p)
 
     def test_no_side_effects_or_actuator_link(self):
         text = ADAPTER.read_text()

@@ -8,9 +8,14 @@ ROOT = Path(__file__).resolve().parents[2]
 CORE = ROOT / 'ChargeLimiter/OfflineAdvisory'
 
 class TripleContract(unittest.TestCase):
-    def test_no_wiring(self):
-        for name in ('ChargeLimiter/daemon.mm', 'ChargeLimiter.xcodeproj/project.pbxproj'):
-            self.assertNotIn('triple_advisory', (ROOT / name).read_text())
+    def test_wiring_readonly(self):
+        """2026-10-18 接线后演进（取代 test_no_wiring）。
+
+        daemon.mm 不直接引用 triple_advisory（经 CLThermalGovernor 间接）；
+        pbxproj 注册 triple_advisory.c 于 daemon target（只读决策链的一环）。
+        """
+        self.assertNotIn('triple_advisory', (ROOT / 'ChargeLimiter/daemon.mm').read_text())
+        self.assertIn('triple_advisory.c', (ROOT / 'ChargeLimiter.xcodeproj/project.pbxproj').read_text())
 
     def test_pure_c_and_external_gate(self):
         h = (CORE / 'triple_advisory.h').read_text()

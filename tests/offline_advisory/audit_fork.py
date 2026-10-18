@@ -20,6 +20,15 @@ ALLOW = ('ChargeLimiter/OfflineAdvisory/', 'tests/offline_advisory/',
          # 这两个 xcscheme 为打包管线授权偏离；pbxproj 等其他 xcodeproj 文件仍逐字节守卫。
          'ChargeLimiter.xcodeproj/xcshareddata/xcschemes/ChargeLimiter roothide.xcscheme',
          'ChargeLimiter.xcodeproj/xcshareddata/xcschemes/ChargeLimiter rootless.xcscheme',
+         # 2026-10-18 离线核心只读接线（用户明确授权，INTEGRATION_OFFLINE.md
+         # "Precise later hook" 落地）：daemon.mm 仅允许 import CLOfflineAdvisory.h +
+         # observeBattery 只读调用（applyChargePolicy 之外）；pbxproj 仅注册
+         # OfflineAdvisory 5 文件进 daemon target。下方 wiring_guard() 强制执行。
+         'ChargeLimiter/daemon.mm',
+         'ChargeLimiter.xcodeproj/project.pbxproj',
+         # pbxproj 注册工具（可复现部署脚本，2026-10-18 接线时使用）:
+         'register_offline_advisory.py',
+         'register_governor.py',
          'out/', 'build_rootful/', 'build_rootless/', 'build_roothide/', 'Payload/',
          'ChargeLimiter/libroot.a', 'ChargeLimiter/libroothide.tbd')
 
@@ -32,6 +41,53 @@ def digest(path):
 
 def allowed(rel):
     return any(rel == a or rel.startswith(a) for a in ALLOW)
+
+
+def wiring_guard():
+    """离线核心接线守卫 v2（2026-10-18 柔性温控接线后演进）。
+
+    架构：daemon.mm -> CLThermalGovernor（决策）-> CLOfflineAdvisory（策略信封）
+    -> notify 档位通道 -> CLThermalSimTweak（作动，Powercuff 式热模拟）。
+    铁律：
+      - daemon.mm: CLOfflineAdvisory 仅 import；作动只经 governor + emergencyHandler。
+      - governor.mm: 唯一 observeBattery 调用点；纯决策——禁 actuator 调用
+        （applyChargePolicy/setInflowStatus/IORegistryEntrySetCFProperties），
+        唯一内核交互是 notify_set_state 档位通道。
+      - advisory 结果绝不传入 applyChargePolicy。
+    """
+    import re
+    daemon = (ROOT / 'ChargeLimiter/daemon.mm').read_text()
+    governor = (ROOT / 'ChargeLimiter/OfflineAdvisory/CLThermalGovernor.mm').read_text()
+    project = (ROOT / 'ChargeLimiter.xcodeproj/project.pbxproj').read_text()
+
+    allowed = (
+        re.compile(r'#import\s+"ChargeLimiter/OfflineAdvisory/CLOfflineAdvisory\.h"'),
+        re.compile(r'observeBattery:'),
+        re.compile(r'^\s*//'),
+    )
+    for ln, line in enumerate(daemon.splitlines(), 1):
+        if 'CLOfflineAdvisory' in line and not any(p.search(line) for p in allowed):
+            raise AssertionError(
+                f'daemon.mm:{ln}: unauthorized CLOfflineAdvisory reference: {line.strip()}')
+
+    for m in re.finditer(r'applyChargePolicy\s*\(([^;]*?)\)\s*;', daemon, re.S):
+        args = m.group(1)
+        if 'dvisory' in args or 'observeBattery' in args:
+            raise AssertionError('advisory result leaked into applyChargePolicy')
+
+    assert '#import "ChargeLimiter/OfflineAdvisory/CLThermalGovernor.h"' in daemon, \
+        'daemon.mm missing governor import'
+    assert 'evaluateBattery:' in daemon, 'daemon.mm missing governor evaluateBattery call'
+
+    assert '#import "CLOfflineAdvisory.h"' in governor, 'governor missing advisory import'
+    assert 'observeBattery:' in governor, 'governor missing observeBattery call'
+    for bad in ('applyChargePolicy', 'setInflowStatus', 'IORegistryEntrySetCFProperties'):
+        assert bad not in governor, f'governor.mm must not actuate: {bad}'
+    assert 'notify_set_state' in governor, 'governor missing notify channel write'
+
+    for f in ('thermal_policy.c', 'native_capacity.c', 'temperature_stop.c',
+              'triple_advisory.c', 'CLOfflineAdvisory.mm', 'CLThermalGovernor.mm'):
+        assert f in project, f'pbxproj missing registration: {f}'
 
 
 def audit():
@@ -50,8 +106,7 @@ def audit():
         raise AssertionError({'changed_upstream': changed[:12], 'unexpected': unexpected[:12]})
     live = (ROOT/'ChargeLimiter/daemon.mm').read_text()
     project = (ROOT/'ChargeLimiter.xcodeproj/project.pbxproj').read_text()
-    assert 'CLOfflineAdvisory' not in live and 'triple_advisory' not in live
-    assert 'CLOfflineAdvisory' not in project and 'triple_advisory' not in project
+    wiring_guard()
     print(f'PASS: {len(originals) - len(diverged)} baseline files unchanged; '
           f'{len(diverged)} allowlisted divergence(s) {diverged}; '
           f'{len(additional)} allowlisted offline additions; no daemon/project registration')

@@ -20,8 +20,11 @@ int main(int argc, char** argv) {
 #import <Foundation/Foundation.h>
 #import <UserNotifications/UserNotifications.h>
 #include <notify.h>
+#include <mach/mach_time.h>
 
 #import "CLSimpleHTTPServer.h"
+#import "ChargeLimiter/OfflineAdvisory/CLOfflineAdvisory.h"
+#import "ChargeLimiter/OfflineAdvisory/CLThermalGovernor.h"
 
 #include "utils.h"
 
@@ -4753,6 +4756,22 @@ static void evaluateFullChargeSchedule(BOOL forceApply) {
     refreshBatteryStateAndApplyPolicy();
 }
 
+// 柔性温控入口（2026-10-18 用户授权接线）：
+// clObserveOfflineAdvisory -> CLThermalGovernor 温度闭环 -> notify 档位通道 ->
+// CLThermalSimTweak -> putDeviceInThermalSimulationMode -> PMIC 柔性降功率。
+// emergency（temp >= 44℃）才经 emergencyHandler 调上游停充原语兜底。
+static void clObserveOfflineAdvisory(NSDictionary* bat_info) {
+    CLThermalGovernor* governor = [CLThermalGovernor sharedGovernor];
+    if (governor.emergencyHandler == nil) {
+        governor.emergencyHandler = ^(BOOL stop) {
+            io_service_t serv = getIOPMPSServ();
+            if (serv == IO_OBJECT_NULL) return;
+            setInflowStatusOverride(serv, stop ? NO : YES);
+        };
+    }
+    [governor evaluateBattery:bat_info];
+}
+
 static void onBatteryEvent(io_service_t serv) {
     @autoreleasepool {
         NSDictionary* old_bat_info = bat_info;
@@ -4763,6 +4782,7 @@ static void onBatteryEvent(io_service_t serv) {
         if (!g_enable) {
             return;
         }
+        clObserveOfflineAdvisory(bat_info);
         applyChargePolicy(old_bat_info, bat_info);
         onBatteryEventEnd();
     }

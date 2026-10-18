@@ -39,6 +39,24 @@
 		18C123BC2C8C08B300FAAC6C /* libz.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = 18C50C792B6DFD6000793FA9 /* libz.tbd */; };
 		18C123BD2C8C08B300FAAC6C /* IOKit.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = 18C50C632B6CE41800793FA9 /* IOKit.tbd */; };
 		18C123CB2C8C08CB00FAAC6C /* daemon.mm in Sources */ = {isa = PBXBuildFile; fileRef = 187886422B51976B00E48B28 /* daemon.mm */; };
+		2A43498E4FC44DF0A8347611 /* CLThermalGovernor.mm in Sources */ = {isa = PBXBuildFile; fileRef = 2A43498E4FC44DF0A8347601 /* CLThermalGovernor.mm */; };
+		2A43498E4FC44DF0A8347612 /* CLThermalGovernor.mm in Sources */ = {isa = PBXBuildFile; fileRef = 2A43498E4FC44DF0A8347601 /* CLThermalGovernor.mm */; };
+		2A43498E4FC44DF0A8347613 /* CLThermalGovernor.mm in Sources */ = {isa = PBXBuildFile; fileRef = 2A43498E4FC44DF0A8347601 /* CLThermalGovernor.mm */; };
+		2A43498E4FC44DF0A8347511 /* CLOfflineAdvisory.mm in Sources */ = {isa = PBXBuildFile; fileRef = 2A43498E4FC44DF0A8347501 /* CLOfflineAdvisory.mm */; };
+		2A43498E4FC44DF0A8347512 /* thermal_policy.c in Sources */ = {isa = PBXBuildFile; fileRef = 2A43498E4FC44DF0A8347502 /* thermal_policy.c */; };
+		2A43498E4FC44DF0A8347513 /* native_capacity.c in Sources */ = {isa = PBXBuildFile; fileRef = 2A43498E4FC44DF0A8347503 /* native_capacity.c */; };
+		2A43498E4FC44DF0A8347514 /* temperature_stop.c in Sources */ = {isa = PBXBuildFile; fileRef = 2A43498E4FC44DF0A8347504 /* temperature_stop.c */; };
+		2A43498E4FC44DF0A8347515 /* triple_advisory.c in Sources */ = {isa = PBXBuildFile; fileRef = 2A43498E4FC44DF0A8347505 /* triple_advisory.c */; };
+		2A43498E4FC44DF0A8347516 /* CLOfflineAdvisory.mm in Sources */ = {isa = PBXBuildFile; fileRef = 2A43498E4FC44DF0A8347501 /* CLOfflineAdvisory.mm */; };
+		2A43498E4FC44DF0A8347517 /* thermal_policy.c in Sources */ = {isa = PBXBuildFile; fileRef = 2A43498E4FC44DF0A8347502 /* thermal_policy.c */; };
+		2A43498E4FC44DF0A8347518 /* native_capacity.c in Sources */ = {isa = PBXBuildFile; fileRef = 2A43498E4FC44DF0A8347503 /* native_capacity.c */; };
+		2A43498E4FC44DF0A8347519 /* temperature_stop.c in Sources */ = {isa = PBXBuildFile; fileRef = 2A43498E4FC44DF0A8347504 /* temperature_stop.c */; };
+		2A43498E4FC44DF0A8347520 /* triple_advisory.c in Sources */ = {isa = PBXBuildFile; fileRef = 2A43498E4FC44DF0A8347505 /* triple_advisory.c */; };
+		2A43498E4FC44DF0A8347521 /* CLOfflineAdvisory.mm in Sources */ = {isa = PBXBuildFile; fileRef = 2A43498E4FC44DF0A8347501 /* CLOfflineAdvisory.mm */; };
+		2A43498E4FC44DF0A8347522 /* thermal_policy.c in Sources */ = {isa = PBXBuildFile; fileRef = 2A43498E4FC44DF0A8347502 /* thermal_policy.c */; };
+		2A43498E4FC44DF0A8347523 /* native_capacity.c in Sources */ = {isa = PBXBuildFile; fileRef = 2A43498E4FC44DF0A8347503 /* native_capacity.c */; };
+		2A43498E4FC44DF0A8347524 /* temperature_stop.c in Sources */ = {isa = PBXBuildFile; fileRef = 2A43498E4FC44DF0A8347504 /* temperature_stop.c */; };
+		2A43498E4FC44DF0A8347525 /* triple_advisory.c in Sources */ = {isa = PBXBuildFile; fileRef = 2A43498E4FC44DF0A8347505 /* triple_advisory.c */; };
 		18C123CC2C8C08CB00FAAC6C /* utils.mm in Sources */ = {isa = PBXBuildFile; fileRef = 18C50C652B6D2D5D00793FA9 /* utils.mm */; };
 		18C123CF2C8C08CB00FAAC6C /* CFNetwork.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 187886532B519B1600E48B28 /* CFNetwork.framework */; };
 		18C123D12C8C08CB00FAAC6C /* CoreServices.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 18C50C7B2B6DFD8000793FA9 /* CoreServices.framework */; };
@@ -177,6 +195,13 @@
 		1878863F2B51976B00E48B28 /* Base */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; name = Base; path = Base.lproj/LaunchScreen.storyboard; sourceTree = "<group>"; };
 		187886412B51976B00E48B28 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		187886422B51976B00E48B28 /* daemon.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = daemon.mm; sourceTree = "<group>"; };
+		2A43498E4FC44DF0A8347601 /* CLThermalGovernor.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = CLThermalGovernor.mm; sourceTree = "<group>"; };
+		2A43498E4FC44DF0A8347602 /* CLThermalGovernor.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = CLThermalGovernor.h; sourceTree = "<group>"; };
+		2A43498E4FC44DF0A8347501 /* CLOfflineAdvisory.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = CLOfflineAdvisory.mm; sourceTree = "<group>"; };
+		2A43498E4FC44DF0A8347502 /* thermal_policy.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = thermal_policy.c; sourceTree = "<group>"; };
+		2A43498E4FC44DF0A8347503 /* native_capacity.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = native_capacity.c; sourceTree = "<group>"; };
+		2A43498E4FC44DF0A8347504 /* temperature_stop.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = temperature_stop.c; sourceTree = "<group>"; };
+		2A43498E4FC44DF0A8347505 /* triple_advisory.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.c; path = triple_advisory.c; sourceTree = "<group>"; };
 		1878864E2B5199EC00E48B28 /* UIKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = UIKit.framework; path = System/Library/Frameworks/UIKit.framework; sourceTree = SDKROOT; };
 		187886522B519A5B00E48B28 /* lang.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = lang.json; sourceTree = "<group>"; };
 		A7F0C0C12F5A000100000005 /* Localizable.strings */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; path = "en.lproj/Localizable.strings"; sourceTree = "<group>"; };
@@ -350,6 +375,15 @@
 			name = Products;
 			sourceTree = "<group>";
 		};
+		2A43498E4FC44DF0A8347500 /* OfflineAdvisory */ = {isa = PBXGroup; children = (
+				2A43498E4FC44DF0A8347501 /* CLOfflineAdvisory.mm */,
+				2A43498E4FC44DF0A8347502 /* thermal_policy.c */,
+				2A43498E4FC44DF0A8347503 /* native_capacity.c */,
+				2A43498E4FC44DF0A8347504 /* temperature_stop.c */,
+				2A43498E4FC44DF0A8347505 /* triple_advisory.c */,
+				2A43498E4FC44DF0A8347601 /* CLThermalGovernor.mm */,
+				2A43498E4FC44DF0A8347602 /* CLThermalGovernor.h */,
+			); path = OfflineAdvisory; sourceTree = "<group>"; };
 		1878862F2B51976A00E48B28 /* ChargeLimiter */ = {
 			isa = PBXGroup;
 			children = (
@@ -371,6 +405,7 @@
 				18D0C42E2B7FC64F006A7AB7 /* BackBoardServices.tbd */,
 				1870F5FC2B83B8F100B3660F /* GraphicsServices.tbd */,
 				187886422B51976B00E48B28 /* daemon.mm */,
+				2A43498E4FC44DF0A8347500 /* OfflineAdvisory */,
 				18658A812BCF771800207EF3 /* ui.mm */,
 				18658A832BCF772D00207EF3 /* ui.h */,
 				18C50C672B6D2D6E00793FA9 /* utils.h */,
@@ -788,6 +823,12 @@
 			files = (
 				18C123B02C8C08B300FAAC6C /* utils.mm in Sources */,
 				18C123E82C8C09A400FAAC6C /* daemon.mm in Sources */,
+				2A43498E4FC44DF0A8347511 /* CLOfflineAdvisory.mm in Sources */,
+				2A43498E4FC44DF0A8347512 /* thermal_policy.c in Sources */,
+				2A43498E4FC44DF0A8347513 /* native_capacity.c in Sources */,
+				2A43498E4FC44DF0A8347514 /* temperature_stop.c in Sources */,
+				2A43498E4FC44DF0A8347515 /* triple_advisory.c in Sources */,
+				2A43498E4FC44DF0A8347611 /* CLThermalGovernor.mm in Sources */,
 				A720B9AA2F2F0C0C008B9C91 /* CLSimpleHTTPServer.m in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -798,6 +839,12 @@
 			files = (
 				18C123CC2C8C08CB00FAAC6C /* utils.mm in Sources */,
 				18C123CB2C8C08CB00FAAC6C /* daemon.mm in Sources */,
+				2A43498E4FC44DF0A8347516 /* CLOfflineAdvisory.mm in Sources */,
+				2A43498E4FC44DF0A8347517 /* thermal_policy.c in Sources */,
+				2A43498E4FC44DF0A8347518 /* native_capacity.c in Sources */,
+				2A43498E4FC44DF0A8347519 /* temperature_stop.c in Sources */,
+				2A43498E4FC44DF0A8347520 /* triple_advisory.c in Sources */,
+				2A43498E4FC44DF0A8347612 /* CLThermalGovernor.mm in Sources */,
 				A720B9AB2F2F0C0D008B9C91 /* CLSimpleHTTPServer.m in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -828,6 +875,12 @@
 			files = (
 				3E3FBDB2BF554C03819EE0A8 /* utils.mm in Sources */,
 				2A43498E4FC44DF0A8347461 /* daemon.mm in Sources */,
+				2A43498E4FC44DF0A8347521 /* CLOfflineAdvisory.mm in Sources */,
+				2A43498E4FC44DF0A8347522 /* thermal_policy.c in Sources */,
+				2A43498E4FC44DF0A8347523 /* native_capacity.c in Sources */,
+				2A43498E4FC44DF0A8347524 /* temperature_stop.c in Sources */,
+				2A43498E4FC44DF0A8347525 /* triple_advisory.c in Sources */,
+				2A43498E4FC44DF0A8347613 /* CLThermalGovernor.mm in Sources */,
 				0264AFCEDE3A4DA3A108C0B4 /* CLSimpleHTTPServer.m in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
