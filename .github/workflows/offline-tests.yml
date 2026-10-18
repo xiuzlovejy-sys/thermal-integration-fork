@@ -55,6 +55,10 @@ jobs:
           # 上游固定提交（与交接文档一致）
           git clone --filter=blob:none https://github.com/tunecc/ChargeLimiter /tmp/upstream
           git -C /tmp/upstream checkout 38bea6cba92a02b2af6b6d3fa6ed807d67342a1f
+          # 剥掉 .git：partial clone 的内部对象结构（pack/commit-graph/logs）与分叉的
+          # .git 历史必然不同，会被审计脚本算成 changed_upstream；基准须为纯工作树
+          # （与本地 tar 解压基准同形状，本地 PASS 即此形状）。
+          rm -rf /tmp/upstream/.git
           THERMAL_REVIEW_BASE=/tmp/upstream \
             python3 tests/offline_advisory/audit_fork.py
 

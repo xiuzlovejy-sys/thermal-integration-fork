@@ -100,7 +100,7 @@ jobs:
           # 不触发 rootful/rootless/TIPA 构建（交接文档第五节要求）。
           ./scripts/build_packages.sh --roothide-only
 
-      - name: Verify deb contents: arm64e ABI caps 0x80 on every Mach-O
+      - name: "Verify deb contents: arm64e ABI caps 0x80 on every Mach-O"
         run: |
           set -euo pipefail
           DEB=$(ls out/ChargeLimiter_*_roothide_arm64e.deb)
