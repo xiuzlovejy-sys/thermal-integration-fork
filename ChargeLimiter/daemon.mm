@@ -125,6 +125,9 @@ static NSTimer* g_disableInflowRetryTimer = nil;
 static NSTimer* g_trollStoreBundleCheckTimer = nil;
 static int g_disableInflowRetryAttemptsRemaining = 0;
 static BOOL g_chargeCommandEnabled = YES;
+// 温控闭环心跳（Jy's charge）：IOKit 的电池属性在充电稳态下可能长时间不变，
+// 纯事件驱动会让档位"冻住"——温度上升了却没人重新评估。
+static NSTimer* g_jyThermalEvalTimer = nil;
 // Jy's charge 温控紧急停充（governor 44℃ 兜底）：
 // applyChargePolicy 的最高优先级分支读它——避免状态机下一轮把停充重新放开
 // （否则 governor 与策略机每轮互相覆盖）。清除后策略机自然恢复。
@@ -224,6 +227,7 @@ static void onBatteryEventEnd(void);
 static void updateStatistics(void);
 static void evaluateFullChargeSchedule(BOOL forceApply);
 static void refreshBatteryStateAndApplyPolicy(void);
+static void clObserveOfflineAdvisory(NSDictionary* bat_info);
 static void applyChargePolicy(NSDictionary* oldInfo, NSDictionary* info);
 static BOOL historyStatsEnabled(void);
 static BOOL hasPotentialExternalPowerSignal(NSDictionary* info);
@@ -4755,6 +4759,9 @@ static void refreshBatteryStateAndApplyPolicy(void) {
     if (!g_enable) {
         return;
     }
+    // 温控评估与策略执行走同一条入口：无论由 IOKit 事件还是心跳定时器触发，
+    // 都应先让 governor 看到这一轮实测快照。
+    clObserveOfflineAdvisory(bat_info);
     applyChargePolicy(old_bat_info, bat_info);
     onBatteryEventEnd();
 }
@@ -6185,7 +6192,21 @@ int main(int argc, char** argv) { // daemon_main
                            platformizeRc, memlimitRc, launchPlistRepairRc, getpid(), getuid(), geteuid(), getgid(), getegid(),
                            privilegeCSOpsRc, privilegeCSOpsErrno, privilegeCSFlags);
             [Service.inst serve];
+            // 温控闭环心跳：15 秒一次主动重评估（读 IOKit → governor → 档位/停充）。
+            // 温控是安全相关的，不能依赖"属性变化才通知"——充电稳态下温度漂移
+            // 未必触发 IOPMPowerSource 事件，档位就会停在旧值上。
+            if (g_jyThermalEvalTimer == nil) {
+                g_jyThermalEvalTimer = [NSTimer scheduledTimerWithTimeInterval:15.0
+                                                                       repeats:YES
+                                                                         block:^(NSTimer* timer) {
+                    refreshBatteryStateAndApplyPolicy();
+                }];
+            }
             atexit_b(^{
+                if (g_jyThermalEvalTimer != nil) {
+                    [g_jyThermalEvalTimer invalidate];
+                    g_jyThermalEvalTimer = nil;
+                }
                 if (g_fullChargeScheduleTimer != nil) {
                     [g_fullChargeScheduleTimer invalidate];
                     g_fullChargeScheduleTimer = nil;

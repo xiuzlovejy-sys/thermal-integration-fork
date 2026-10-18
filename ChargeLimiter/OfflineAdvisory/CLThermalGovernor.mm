@@ -13,8 +13,10 @@ extern BOOL getLocalBool(NSString *key, BOOL defaultValue);
 extern int getLocalInt(NSString *key, int defaultValue);
 extern NSString *getLogPath(void);
 
-static const unsigned long long kJYLogMaxBytes = 128 * 1024;
-static const unsigned long long kJYLogKeepBytes = 64 * 1024;
+// 日志体积上限：32KB，超出后只保留最近 16KB（自覆盖，不会无限增长）。
+// 按每行约 100 字节算，16KB ≈ 160 行 ≈ 近 2 小时的 40 秒心跳，排障够用。
+static const unsigned long long kJYLogMaxBytes = 32 * 1024;
+static const unsigned long long kJYLogKeepBytes = 16 * 1024;
 
 // 与 CLThermalSimTweak.m 同名通道（daemon 写、tweak 读后下发热模拟档位）。
 static NSString *const CLGovernorApplyNotification = @"com.jy.charge.thermalapply";
@@ -74,7 +76,7 @@ static NSString *const CLGovernorApplyNotification = @"com.jy.charge.thermalappl
     } @catch (NSException *e) {
         [fh closeFile];
     }
-    // 体积上限：超过 128KB 保留最近 64KB（1Hz 约 20 分钟写满，频率可接受）。
+    // 体积上限：超过 32KB 保留最近 16KB（自覆盖，永不无限增长）。
     NSDictionary *attrs = [fm attributesOfItemAtPath:path error:NULL];
     if ([attrs fileSize] > kJYLogMaxBytes) {
         NSData *all = [NSData dataWithContentsOfFile:path];
@@ -249,12 +251,17 @@ static double CLContinuousSeconds(void) {
 }
 
 - (void)logEvaluation:(NSInteger)level action:(NSInteger)action reason:(NSString *)reason {
+    // 手动开关（App 设置项）。排障时才需要，平时可以彻底关掉。
+    if (!getLocalBool(@"jy_log_enabled", YES)) return;
+
     NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
     BOOL changed = !self.hasLoggedOnce
                    || level != self.loggedLevel
                    || action != self.loggedAction;
-    // 心跳 30 秒：即使档位不变也能看到温度/电流在动，避免"日志空白 = 没跑"的误判。
-    BOOL heartbeat = (now - self.lastLogTs) >= 30.0;
+    // 只有"真的在做事"才写心跳：充电中，或处于非零档位。
+    // 拔线且档位归零后就不再产生新行——日志自然停止增长，不需要额外定时器。
+    BOOL meaningful = self.lastCharging || level != 0;
+    BOOL heartbeat = meaningful && (now - self.lastLogTs) >= 30.0;
     if (!changed && !heartbeat) return;
     self.hasLoggedOnce = YES;
     self.loggedLevel = level;

@@ -107,6 +107,8 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
 @property (nonatomic, strong) UITextView *logTextView;
 @property (nonatomic, strong) UILabel *logInfoLabel;
 @property (nonatomic, strong) NSLayoutConstraint *logHeight;
+@property (nonatomic, strong) NSTimer *logTimer;
+@property (nonatomic, strong) UISwitch *logSwitch;
 
 // 显式声明（避免"方法定义在使用之后"的实例方法解析差异，编译更稳）
 - (void)refresh;
@@ -128,6 +130,7 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
 - (void)toggleLog;
 - (void)loadLog;
 - (void)clearLog;
+- (void)logToggled:(UISwitch *)sender;
 
 @end
 
@@ -154,6 +157,7 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
 
 - (void)dealloc {
     [_refreshTimer invalidate];
+    [_logTimer invalidate];
     [[NSNotificationCenter defaultCenter] removeObserver:self];
 }
 
@@ -420,6 +424,14 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
     logClear.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
     [logClear addTarget:self action:@selector(clearLog) forControlEvents:UIControlEventTouchUpInside];
 
+    // 记录开关：默认开，排障后可以彻底关掉（关闭后 daemon 不再写任何日志行）。
+    self.logSwitch = [[UISwitch alloc] init];
+    self.logSwitch.translatesAutoresizingMaskIntoConstraints = NO;
+    self.logSwitch.transform = CGAffineTransformMakeScale(0.75, 0.75);
+    self.logSwitch.onTintColor = CLColorTeal();
+    [self.logSwitch addTarget:self action:@selector(logToggled:)
+             forControlEvents:UIControlEventValueChanged];
+
     self.logInfoLabel = [self label:@"" size:10 weight:UIFontWeightRegular color:CLColorSub()];
     self.logInfoLabel.numberOfLines = 1;
     self.logInfoLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
@@ -437,6 +449,7 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
 
     [logCard addSubview:logToggle];
     [logCard addSubview:logClear];
+    [logCard addSubview:self.logSwitch];
     [logCard addSubview:self.logInfoLabel];
     [logCard addSubview:self.logTextView];
     self.logHeight = [self.logTextView.heightAnchor constraintEqualToConstant:0];
@@ -445,8 +458,11 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
         [logToggle.leadingAnchor constraintEqualToAnchor:logCard.leadingAnchor constant:20],
         [logToggle.heightAnchor constraintEqualToConstant:22],
 
+        [self.logSwitch.centerYAnchor constraintEqualToAnchor:logToggle.centerYAnchor],
+        [self.logSwitch.trailingAnchor constraintEqualToAnchor:logCard.trailingAnchor constant:-16],
+
         [logClear.centerYAnchor constraintEqualToAnchor:logToggle.centerYAnchor],
-        [logClear.trailingAnchor constraintEqualToAnchor:logCard.trailingAnchor constant:-20],
+        [logClear.trailingAnchor constraintEqualToAnchor:self.logSwitch.leadingAnchor constant:-8],
 
         [self.logInfoLabel.topAnchor constraintEqualToAnchor:logToggle.bottomAnchor constant:4],
         [self.logInfoLabel.leadingAnchor constraintEqualToAnchor:logToggle.leadingAnchor],
@@ -597,6 +613,7 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
     self.applyingRemoteValues = YES;
 
     [self.thermalSwitch setOn:[self boolFromConf:@"jy_thermal_enabled" fallback:YES] animated:NO];
+    [self.logSwitch setOn:[self boolFromConf:@"jy_log_enabled" fallback:YES] animated:NO];
 
     NSInteger maxPercent = [self intFromConf:@"jy_max_percent" fallback:[self intFromConf:@"charge_above" fallback:80]];
     self.maxSlider.value = (float)MAX(50, MIN(100, maxPercent));
@@ -715,15 +732,25 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
     } else {
         self.logTextView.hidden = YES;
         self.logHeight.constant = 0;
+        [self.logTimer invalidate];
+        self.logTimer = nil;
     }
 }
 
 - (void)loadLog {
     __weak typeof(self) weakSelf = self;
+    // 面板展开期间每 3 秒自动刷新——日志本来就是用来看"现在发生了什么"的，
+    // 每次都要手动收起再展开才能看到新行，等于没有。
+    if (self.logTimer == nil) {
+        self.logTimer = [NSTimer scheduledTimerWithTimeInterval:3.0 repeats:YES block:^(NSTimer *t) {
+            [weakSelf loadLog];
+        }];
+    }
     [[CLAPIClient shared] sendRequest:@{@"api": @"jy_log"}
                           completion:^(NSDictionary *response, NSError *error) {
         NSDictionary *data = [response[@"data"] isKindOfClass:[NSDictionary class]] ? response[@"data"] : nil;
         NSString *text = [data[@"text"] isKindOfClass:[NSString class]] ? data[@"text"] : @"";
+        BOOL wasHidden = weakSelf.logTextView.hidden;
         weakSelf.logTextView.text = text.length
             ? text
             : @"（暂无记录：daemon 还没有产生温控评估日志。若已插电仍为空，说明 governor 没有执行。）";
@@ -734,7 +761,8 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
                                       name, size.doubleValue / 1024.0];
         weakSelf.logTextView.hidden = NO;
         weakSelf.logHeight.constant = 220;
-        [weakSelf.logTextView setContentOffset:CGPointZero animated:NO];
+        // 只有首次展开才回到顶部；自动刷新时不打断用户正在看的位置。
+        if (wasHidden) [weakSelf.logTextView setContentOffset:CGPointZero animated:NO];
     }];
 }
 
@@ -745,6 +773,14 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
         weakSelf.logTextView.text = @"（日志已清空）";
         weakSelf.logInfoLabel.text = @"jys-governor.log · 0.0 KB";
     }];
+}
+
+- (void)logToggled:(UISwitch *)sender {
+    BOOL on = sender.isOn;
+    self.lastUserWriteTs = [NSDate timeIntervalSinceReferenceDate];
+    [self writeKey:@"jy_log_enabled" value:@(on)];
+    [self showStatus:on ? @"运行日志已开启" : @"运行日志已关闭" ok:YES];
+    if (!on) self.logTextView.text = @"（日志记录已关闭，可随时重新打开）";
 }
 
 @end
