@@ -212,6 +212,16 @@ static double CLContinuousSeconds(void) {
     // emergency：策略内核判 TP_MANUAL_STOP_REVIEW（temp >= emergency）→
     // heavy 档 + 布尔停充兜底（经 daemon 注入的 emergencyHandler）。
     BOOL emergency = (action == TP_MANUAL_STOP_REVIEW);
+    // 回落滞回：一旦锁存，只有温度降到 emergency - jy_emergency_fall（默认 3℃）
+    // 以下才解除。否则 39↔37.9 的窄带会让充电每 45 秒停/充震荡一次
+    // （真机 01:08 实测），强电流反复冲击电池。
+    if (self.emergencyLatched && !emergency) {
+        double emergencyC = getLocalInt(@"jy_emergency", 44);
+        double fallC = getLocalInt(@"jy_emergency_fall", 3);
+        if (self.lastTempC >= (emergencyC - fallC)) {
+            emergency = YES;   // 仍维持停充锁存
+        }
+    }
     [self setEmergencyLatched:emergency];
 
     CLThermalLevel target = CLThermalLevelOff;
