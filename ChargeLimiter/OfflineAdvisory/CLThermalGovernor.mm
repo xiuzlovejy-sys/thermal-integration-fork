@@ -250,6 +250,16 @@ static double CLContinuousSeconds(void) {
           stop ? @"STOP" : @"RESUME", _emergencyLatched, _capacityLatched);
 }
 
+static NSString *CLTimestamp(void) {
+    static NSDateFormatter *fmt = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        fmt = [[NSDateFormatter alloc] init];
+        fmt.dateFormat = @"MM-dd HH:mm:ss";
+    });
+    return [fmt stringFromDate:[NSDate date]];
+}
+
 - (void)logEvaluation:(NSInteger)level action:(NSInteger)action reason:(NSString *)reason {
     // 手动开关（App 设置项）。排障时才需要，平时可以彻底关掉。
     if (!getLocalBool(@"jy_log_enabled", YES)) return;
@@ -268,15 +278,9 @@ static double CLContinuousSeconds(void) {
     self.loggedAction = action;
     self.lastLogTs = now;
 
-    static NSDateFormatter *fmt = nil;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        fmt = [[NSDateFormatter alloc] init];
-        fmt.dateFormat = @"MM-dd HH:mm:ss";
-    });
     NSString *line = [NSString stringWithFormat:
         @"%@ temp=%.1fC lvl=%ld act=%ld reason=%@ amp=%lldmA chg=%d en=%d rise=%d/%d/%d",
-        [fmt stringFromDate:[NSDate date]], self.lastTempC, (long)level, (long)action, reason,
+        CLTimestamp(), self.lastTempC, (long)level, (long)action, reason,
         self.lastAmpMa, (int)self.lastCharging,
         (int)getLocalBool(@"jy_thermal_enabled", YES),
         getLocalInt(@"jy_rise_light", 35),
@@ -289,7 +293,15 @@ static double CLContinuousSeconds(void) {
     if (level == self.currentLevel) return;
     self.currentLevel = level;
     if (self.applyToken >= 0) {
-        notify_set_state(self.applyToken, (uint64_t)level);
+        // 写通道并回读：如果 write_status 非 0 或 readback 与目标不一致，
+        // 说明通道本身没通（例如 daemon 没有该 notify 域权限），
+        // 与"写成功但系统不响应"是两种完全不同的故障。
+        uint32_t st = notify_set_state(self.applyToken, (uint64_t)level);
+        uint64_t rb = 0;
+        notify_get_state(self.applyToken, &rb);
+        [CLThermalGovernor appendLogLine:[NSString stringWithFormat:
+            @"%@ [channel] target=%lu write=%u readback=%llu",
+            CLTimestamp(), (unsigned long)level, st, (unsigned long long)rb]];
     }
     NSLog(@"[CLGovernor] thermal level -> %lu (%@) temp=%.1fC amp=%lldmA charging=%d",
           (unsigned long)level, reason, _lastTempC, _lastAmpMa, (int)_lastCharging);

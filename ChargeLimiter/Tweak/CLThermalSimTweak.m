@@ -20,6 +20,7 @@
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
+#include <stdarg.h>
 #import <notify.h>
 #import <IOKit/IOKitLib.h>
 
@@ -36,6 +37,47 @@ static int CLTSSessionToken = -1;
 
 // Mikasa 同款：强引用捕获，无 dealloc hook。
 static id CLTSCurrentProduct = nil;
+
+#pragma mark - 执行端日志（App 可读，判断注入是否成立）
+
+// thermalmonitord 以 root 运行，日志落在 /var/mobile 下，App 经 daemon 读取。
+// 上限 16KB，超出保留最近 8KB——执行端只在注入/应用时写，量很小。
+static void CLTSLog(NSString *fmt, ...) {
+    static NSString *path = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSString *dir = @"/var/mobile/Library/Logs/JysCharge";
+        [[NSFileManager defaultManager] createDirectoryAtPath:dir
+                                  withIntermediateDirectories:YES
+                                                   attributes:nil
+                                                        error:NULL];
+        path = [dir stringByAppendingPathComponent:@"jys-tweak.log"];
+    });
+    va_list ap;
+    va_start(ap, fmt);
+    NSString *body = [[NSString alloc] initWithFormat:fmt arguments:ap];
+    va_end(ap);
+    NSString *line = [NSString stringWithFormat:@"%@ %@\n", [NSDate date], body];
+
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSData *data = [line dataUsingEncoding:NSUTF8StringEncoding];
+    if (![fm fileExistsAtPath:path]) {
+        [data writeToFile:path atomically:YES];
+        return;
+    }
+    NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:path];
+    if (fh == nil) { [data writeToFile:path atomically:YES]; return; }
+    @try { [fh seekToEndOfFile]; [fh writeData:data]; [fh closeFile]; }
+    @catch (NSException *e) { [fh closeFile]; }
+    NSDictionary *attrs = [fm attributesOfItemAtPath:path error:NULL];
+    if ([attrs fileSize] > 16 * 1024) {
+        NSData *all = [NSData dataWithContentsOfFile:path];
+        if (all.length > 8 * 1024) {
+            [[all subdataWithRange:NSMakeRange(all.length - 8 * 1024, 8 * 1024)]
+                writeToFile:path atomically:YES];
+        }
+    }
+}
 
 #pragma mark - 档位编码（Powercuff 编码）
 
@@ -60,12 +102,21 @@ static uint64_t CLTSModeValueForString(NSString *mode) {
 #pragma mark - 档位应用（Mikasa ApplyThermals 同款）
 
 static void CLTSApplyThermals(void) {
-    if (CLTSCurrentProduct == nil) return;
-    if (![CLTSCurrentProduct respondsToSelector:@selector(putDeviceInThermalSimulationMode:)]) return;
+    if (CLTSCurrentProduct == nil) {
+        CLTSLog(@"[apply] skipped: product not captured");
+        return;
+    }
+    if (![CLTSCurrentProduct respondsToSelector:@selector(putDeviceInThermalSimulationMode:)]) {
+        CLTSLog(@"[apply] FAIL: selector putDeviceInThermalSimulationMode: missing on %@",
+                NSStringFromClass([CLTSCurrentProduct class]));
+        return;
+    }
     uint64_t mode = 0;
     notify_get_state(CLTSApplyToken, &mode);
     NSString *modeString = CLTSStringForThermalMode(mode);
     NSLog(@"[CLThermalSim] apply mode=%@", modeString); // 生命周期日志：注入/应用的直接证据
+    CLTSLog(@"[apply] mode=%@ (%llu) -> putDeviceInThermalSimulationMode:", modeString,
+            (unsigned long long)mode);
     // off 也下发：清除已生效档位（还原语义）。
     ((void (*)(id, SEL, NSString *))objc_msgSend)(CLTSCurrentProduct,
                                                   @selector(putDeviceInThermalSimulationMode:),
@@ -239,6 +290,9 @@ static id CLTSInitProductOverride(id self, SEL _cmd, id data) {
     if ([result respondsToSelector:@selector(putDeviceInThermalSimulationMode:)]) {
         CLTSCurrentProduct = result; // 强引用捕获（Mikasa 同款）
         NSLog(@"[CLThermalSim] product captured"); // 生命周期日志：hook 已生效的直接证据
+        CLTSLog(@"[hook] product captured (%@), selector=%d",
+                NSStringFromClass([result class]),
+                (int)[result respondsToSelector:@selector(putDeviceInThermalSimulationMode:)]);
     }
     CLTSApplyThermals(); // thermalmonitord 重启重放：内核态即真相
     return result;
@@ -273,6 +327,7 @@ __attribute__((constructor)) static void CLTSInit(void) {
     @autoreleasepool {
         Class productClass = objc_getClass("CommonProduct");
         NSLog(@"[CLThermalSim] ctor loaded productClass=%@", productClass != nil ? @"yes" : @"no");
+        CLTSLog(@"[ctor] loaded, CommonProduct=%@", productClass != nil ? @"yes" : @"no");
         if (productClass != nil) { // 类缺失（系统变更）：静默退回
             CLTSHookSelector(productClass, @selector(initProduct:), (IMP)CLTSInitProductOverride, &CLTSOrigInitProduct);
             // 捕获卫生（break98pl）：产品对象释放时清捕获，防僵尸下发
@@ -329,5 +384,10 @@ __attribute__((constructor)) static void CLTSInit(void) {
               CLTSBatteryNotifier != IO_OBJECT_NULL ? @"ok" : @"failed",
               CLTSPowerSourceRef != NULL ? @"ok" : @"failed",
               restoredEnabled, (unsigned long long)restoredCharge, (unsigned long long)restoredIdle);
+        CLTSLog(@"[ctor] done apply_reg=%u session_reg=%u interest=%@ iops=%@ restore=%d",
+                applyReg, sessionReg,
+                CLTSBatteryNotifier != IO_OBJECT_NULL ? @"ok" : @"failed",
+                CLTSPowerSourceRef != NULL ? @"ok" : @"failed",
+                (int)restoredEnabled);
     }
 }

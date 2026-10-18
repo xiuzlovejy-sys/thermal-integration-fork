@@ -5358,12 +5358,23 @@ NSDictionary* handleReq(NSDictionary* nsreq) {
             @"status": @0,
         };
     } else if ([api isEqualToString:@"jy_log"]) {
-        // 运行日志（App 排障面板）：只读末尾 200 行 + 体积/路径。
+        // 运行日志（App 排障面板）：daemon 决策日志 + tweak 执行日志。
+        // 两段分开是刻意的——"决策输出正确但执行端没接上"必须一眼可辨。
         NSString *path = [CLThermalGovernor logPath];
         NSString *text = [CLThermalGovernor logTailWithMaxLines:200];
+        NSString *tweakPath = @"/var/mobile/Library/Logs/JysCharge/jys-tweak.log";
+        NSString *tweak = [NSString stringWithContentsOfFile:tweakPath
+                                                    encoding:NSUTF8StringEncoding
+                                                       error:NULL];
+        if (tweak.length > 3000) {
+            tweak = [tweak substringFromIndex:tweak.length - 3000];
+        }
+        NSString *combined = [NSString stringWithFormat:
+            @"=== daemon 决策 ===\n%@\n\n=== tweak 执行 ===\n%@",
+            text ?: @"", tweak.length ? tweak : @"（无记录：tweak 未注入 thermalmonitord）"];
         NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:path error:NULL];
         return @{@"status": @0,
-                 @"data": @{@"text": text ?: @"",
+                 @"data": @{@"text": combined,
                             @"size": attrs[NSFileSize] ?: @0,
                             @"path": path ?: @""}};
     } else if ([api isEqualToString:@"jy_log_clear"]) {
