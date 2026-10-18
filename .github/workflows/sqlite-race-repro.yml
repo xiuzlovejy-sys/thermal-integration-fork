@@ -45,10 +45,16 @@ concurrency:
 
 jobs:
   repro:
-    runs-on: macos-15
+    # Apple Clang 不支持 TSan（-fsanitize=thread），GitHub macOS runner 用的是 Xcode clang，
+    # 在 macos-* 上 run_repro.sh 的 build locked 阶段即失败（tee 吞退出码导致步骤假绿、
+    # Gate 才报红）。Linux clang 完整支持 TSan，且 ubuntu runner 免费更快，故迁回 ubuntu-latest。
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+
+      - name: Install sqlite3 dev
+        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev
 
       - name: Run sqlite race repro
         env:
