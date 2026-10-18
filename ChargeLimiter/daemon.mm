@@ -5081,6 +5081,8 @@ static NSDictionary* CLMasterOffGateRequest(NSString* api, NSDictionary* nsreq) 
             @"get_policy_events", @"get_diag", @"reload_conf",
             // Jy's charge 运行日志（纯读取/清空本地日志文件，不触碰系统状态）
             @"jy_log", @"jy_log_clear",
+            // 诊断：重启 thermalmonitord 以触发 dylib 注入（用户显式点按）
+            @"jy_restart_thermald",
             // 修复/还原类（D1）
             @"restore_smart_charge", @"repair_mcl_limit", @"charge_control_probe",
             // App 自身数据管理（不触碰系统状态；真机回灌：主开关关闭时用户
@@ -5380,6 +5382,15 @@ NSDictionary* handleReq(NSDictionary* nsreq) {
     } else if ([api isEqualToString:@"jy_log_clear"]) {
         [CLThermalGovernor clearLog];
         return @{@"status": @0, @"data": @{}};
+    } else if ([api isEqualToString:@"jy_restart_thermald"]) {
+        // 诊断用：强制重启 thermalmonitord，让新装的注入 dylib 在进程启动时被加载。
+        // launchd 会立即重新拉起它；SIGKILL 一瞬热管理中断，随后恢复监控。
+        int pid = get_pid_of("thermalmonitord");
+        if (pid > 1) {
+            kill(pid, SIGKILL);
+            return @{@"status": @0, @"data": @{@"killed_pid": @(pid)}};
+        }
+        return @{@"status": @(-1), @"data": @{@"error": @"thermalmonitord not found"}};
     } else if ([api isEqualToString:@"get_bat_info"]) {
         getBatInfo(&bat_info);
         NSMutableDictionary* data = [bat_info mutableCopy];

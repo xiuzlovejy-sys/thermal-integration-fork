@@ -131,6 +131,7 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
 - (void)loadLog;
 - (void)clearLog;
 - (void)logToggled:(UISwitch *)sender;
+- (void)restartThermald;
 
 @end
 
@@ -424,6 +425,13 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
     logClear.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
     [logClear addTarget:self action:@selector(clearLog) forControlEvents:UIControlEventTouchUpInside];
 
+    UIButton *logRestart = [UIButton buttonWithType:UIButtonTypeSystem];
+    logRestart.translatesAutoresizingMaskIntoConstraints = NO;
+    [logRestart setTitle:@"重启服务" forState:UIControlStateNormal];
+    [logRestart setTitleColor:CLColorAmber() forState:UIControlStateNormal];
+    logRestart.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
+    [logRestart addTarget:self action:@selector(restartThermald) forControlEvents:UIControlEventTouchUpInside];
+
     // 记录开关：默认开，排障后可以彻底关掉（关闭后 daemon 不再写任何日志行）。
     self.logSwitch = [[UISwitch alloc] init];
     self.logSwitch.translatesAutoresizingMaskIntoConstraints = NO;
@@ -449,6 +457,7 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
 
     [logCard addSubview:logToggle];
     [logCard addSubview:logClear];
+    [logCard addSubview:logRestart];
     [logCard addSubview:self.logSwitch];
     [logCard addSubview:self.logInfoLabel];
     [logCard addSubview:self.logTextView];
@@ -463,6 +472,9 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
 
         [logClear.centerYAnchor constraintEqualToAnchor:logToggle.centerYAnchor],
         [logClear.trailingAnchor constraintEqualToAnchor:self.logSwitch.leadingAnchor constant:-8],
+
+        [logRestart.centerYAnchor constraintEqualToAnchor:logToggle.centerYAnchor],
+        [logRestart.trailingAnchor constraintEqualToAnchor:logClear.leadingAnchor constant:-8],
 
         [self.logInfoLabel.topAnchor constraintEqualToAnchor:logToggle.bottomAnchor constant:4],
         [self.logInfoLabel.leadingAnchor constraintEqualToAnchor:logToggle.leadingAnchor],
@@ -781,6 +793,23 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
     [self writeKey:@"jy_log_enabled" value:@(on)];
     [self showStatus:on ? @"运行日志已开启" : @"运行日志已关闭" ok:YES];
     if (!on) self.logTextView.text = @"（日志记录已关闭，可随时重新打开）";
+}
+
+- (void)restartThermald {
+    [self showStatus:@"正在重启 thermalmonitord…" ok:YES];
+    __weak typeof(self) weakSelf = self;
+    [[CLAPIClient shared] sendRequest:@{@"api": @"jy_restart_thermald"}
+                          completion:^(NSDictionary *response, NSError *error) {
+        NSDictionary *data = [response[@"data"] isKindOfClass:[NSDictionary class]] ? response[@"data"] : nil;
+        int killed = [data[@"killed_pid"] intValue];
+        if (killed > 0) {
+            [weakSelf showStatus:[NSString stringWithFormat:@"已重启 thermalmonitord (pid %d)", killed] ok:YES];
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC),
+                           dispatch_get_main_queue(), ^{ [weakSelf loadLog]; });
+        } else {
+            [weakSelf showStatus:@"未找到 thermalmonitord" ok:NO];
+        }
+    }];
 }
 
 @end
