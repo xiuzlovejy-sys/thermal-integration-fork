@@ -5072,6 +5072,8 @@ static NSDictionary* CLMasterOffGateRequest(NSString* api, NSDictionary* nsreq) 
             // 只读诊断
             @"get_conf", @"get_bat_info", @"get_mcl_diagnostics", @"get_statistics",
             @"get_policy_events", @"get_diag", @"reload_conf",
+            // Jy's charge 运行日志（纯读取/清空本地日志文件，不触碰系统状态）
+            @"jy_log", @"jy_log_clear",
             // 修复/还原类（D1）
             @"restore_smart_charge", @"repair_mcl_limit", @"charge_control_probe",
             // App 自身数据管理（不触碰系统状态；真机回灌：主开关关闭时用户
@@ -5348,6 +5350,18 @@ NSDictionary* handleReq(NSDictionary* nsreq) {
         return @{
             @"status": @0,
         };
+    } else if ([api isEqualToString:@"jy_log"]) {
+        // 运行日志（App 排障面板）：只读末尾 200 行 + 体积/路径。
+        NSString *path = [CLThermalGovernor logPath];
+        NSString *text = [CLThermalGovernor logTailWithMaxLines:200];
+        NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:path error:NULL];
+        return @{@"status": @0,
+                 @"data": @{@"text": text ?: @"",
+                            @"size": attrs[NSFileSize] ?: @0,
+                            @"path": path ?: @""}};
+    } else if ([api isEqualToString:@"jy_log_clear"]) {
+        [CLThermalGovernor clearLog];
+        return @{@"status": @0, @"data": @{}};
     } else if ([api isEqualToString:@"get_bat_info"]) {
         getBatInfo(&bat_info);
         NSMutableDictionary* data = [bat_info mutableCopy];

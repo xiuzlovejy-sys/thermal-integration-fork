@@ -39,6 +39,12 @@ typedef NS_ENUM(uint64_t, CLThermalLevel) {
 // 带来了电流变化"（柔性调控的唯一可观测证据，控制器本身不臆造效果）。
 - (NSDictionary *)stateSnapshot;
 
+// 运行日志（真机排障）：落在 daemon 日志同目录的 jys-governor.log。
+// 上限 128KB，超出保留最近 64KB；App 可读末尾若干行并清空。
++ (NSString *)logPath;
++ (NSString *)logTailWithMaxLines:(NSUInteger)lines;
++ (void)clearLog;
+
 @end
 
 #endif

@@ -103,6 +103,10 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
 @property (nonatomic, assign) BOOL capacitySynced;
 // 保存结果反馈：写入被拒绝时不能静默装作成功。
 @property (nonatomic, strong) UILabel *statusLabel;
+// 运行日志面板（默认折叠）
+@property (nonatomic, strong) UITextView *logTextView;
+@property (nonatomic, strong) UILabel *logInfoLabel;
+@property (nonatomic, strong) NSLayoutConstraint *logHeight;
 
 // 显式声明（避免"方法定义在使用之后"的实例方法解析差异，编译更稳）
 - (void)refresh;
@@ -121,6 +125,9 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
 - (void)writeKey:(NSString *)key value:(id)value;
 - (void)showStatus:(NSString *)text ok:(BOOL)ok;
 - (void)clearStatus;
+- (void)toggleLog;
+- (void)loadLog;
+- (void)clearLog;
 
 @end
 
@@ -394,6 +401,64 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
         [self.startDetailLabel.bottomAnchor constraintEqualToAnchor:startCard.bottomAnchor constant:-18],
     ]];
 
+    // ---- 运行日志（默认折叠；排障时展开）----
+    UIView *logCard = [self card];
+    [stack addArrangedSubview:logCard];
+
+    UIButton *logToggle = [UIButton buttonWithType:UIButtonTypeSystem];
+    logToggle.translatesAutoresizingMaskIntoConstraints = NO;
+    [logToggle setTitle:@"运行日志" forState:UIControlStateNormal];
+    [logToggle setTitleColor:CLColorText() forState:UIControlStateNormal];
+    logToggle.titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightMedium];
+    logToggle.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeft;
+    [logToggle addTarget:self action:@selector(toggleLog) forControlEvents:UIControlEventTouchUpInside];
+
+    UIButton *logClear = [UIButton buttonWithType:UIButtonTypeSystem];
+    logClear.translatesAutoresizingMaskIntoConstraints = NO;
+    [logClear setTitle:@"清空" forState:UIControlStateNormal];
+    [logClear setTitleColor:CLColorSub() forState:UIControlStateNormal];
+    logClear.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
+    [logClear addTarget:self action:@selector(clearLog) forControlEvents:UIControlEventTouchUpInside];
+
+    self.logInfoLabel = [self label:@"" size:10 weight:UIFontWeightRegular color:CLColorSub()];
+    self.logInfoLabel.numberOfLines = 1;
+    self.logInfoLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
+
+    self.logTextView = [[UITextView alloc] init];
+    self.logTextView.translatesAutoresizingMaskIntoConstraints = NO;
+    self.logTextView.editable = NO;
+    self.logTextView.scrollEnabled = YES;
+    self.logTextView.backgroundColor = [UIColor colorWithWhite:0.0 alpha:0.25];
+    self.logTextView.layer.cornerRadius = 10;
+    self.logTextView.textColor = CLColorSub();
+    self.logTextView.font = [UIFont monospacedSystemFontOfSize:9.5 weight:UIFontWeightRegular];
+    self.logTextView.text = @"";
+    self.logTextView.hidden = YES;
+
+    [logCard addSubview:logToggle];
+    [logCard addSubview:logClear];
+    [logCard addSubview:self.logInfoLabel];
+    [logCard addSubview:self.logTextView];
+    self.logHeight = [self.logTextView.heightAnchor constraintEqualToConstant:0];
+    [NSLayoutConstraint activateConstraints:@[
+        [logToggle.topAnchor constraintEqualToAnchor:logCard.topAnchor constant:16],
+        [logToggle.leadingAnchor constraintEqualToAnchor:logCard.leadingAnchor constant:20],
+        [logToggle.heightAnchor constraintEqualToConstant:22],
+
+        [logClear.centerYAnchor constraintEqualToAnchor:logToggle.centerYAnchor],
+        [logClear.trailingAnchor constraintEqualToAnchor:logCard.trailingAnchor constant:-20],
+
+        [self.logInfoLabel.topAnchor constraintEqualToAnchor:logToggle.bottomAnchor constant:4],
+        [self.logInfoLabel.leadingAnchor constraintEqualToAnchor:logToggle.leadingAnchor],
+        [self.logInfoLabel.trailingAnchor constraintEqualToAnchor:logCard.trailingAnchor constant:-20],
+
+        [self.logTextView.topAnchor constraintEqualToAnchor:self.logInfoLabel.bottomAnchor constant:8],
+        [self.logTextView.leadingAnchor constraintEqualToAnchor:logCard.leadingAnchor constant:16],
+        [self.logTextView.trailingAnchor constraintEqualToAnchor:logCard.trailingAnchor constant:-16],
+        [self.logTextView.bottomAnchor constraintEqualToAnchor:logCard.bottomAnchor constant:-14],
+        self.logHeight,
+    ]];
+
     // ---- 保存状态（写入被拒时可见；成功时短暂显示"已保存"）----
     self.statusLabel = [self label:@"" size:12 weight:UIFontWeightRegular color:CLColorSub()];
     self.statusLabel.textAlignment = NSTextAlignmentCenter;
@@ -640,6 +705,46 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
                       riseLight, riseModerate, emergency] ok:YES];
     NSLog(@"[Jy] thermal thresholds -> light %d / moderate %d / emergency %d",
           riseLight, riseModerate, emergency);
+}
+
+#pragma mark - 运行日志
+
+- (void)toggleLog {
+    if (self.logTextView.hidden) {
+        [self loadLog];
+    } else {
+        self.logTextView.hidden = YES;
+        self.logHeight.constant = 0;
+    }
+}
+
+- (void)loadLog {
+    __weak typeof(self) weakSelf = self;
+    [[CLAPIClient shared] sendRequest:@{@"api": @"jy_log"}
+                          completion:^(NSDictionary *response, NSError *error) {
+        NSDictionary *data = [response[@"data"] isKindOfClass:[NSDictionary class]] ? response[@"data"] : nil;
+        NSString *text = [data[@"text"] isKindOfClass:[NSString class]] ? data[@"text"] : @"";
+        weakSelf.logTextView.text = text.length
+            ? text
+            : @"（暂无记录：daemon 还没有产生温控评估日志。若已插电仍为空，说明 governor 没有执行。）";
+        NSNumber *size = [data[@"size"] isKindOfClass:[NSNumber class]] ? data[@"size"] : @0;
+        NSString *path = [data[@"path"] isKindOfClass:[NSString class]] ? data[@"path"] : @"";
+        NSString *name = path.length ? path.lastPathComponent : @"jys-governor.log";
+        weakSelf.logInfoLabel.text = [NSString stringWithFormat:@"%@ · %.1f KB",
+                                      name, size.doubleValue / 1024.0];
+        weakSelf.logTextView.hidden = NO;
+        weakSelf.logHeight.constant = 220;
+        [weakSelf.logTextView setContentOffset:CGPointZero animated:NO];
+    }];
+}
+
+- (void)clearLog {
+    __weak typeof(self) weakSelf = self;
+    [[CLAPIClient shared] sendRequest:@{@"api": @"jy_log_clear"}
+                          completion:^(NSDictionary *response, NSError *error) {
+        weakSelf.logTextView.text = @"（日志已清空）";
+        weakSelf.logInfoLabel.text = @"jys-governor.log · 0.0 KB";
+    }];
 }
 
 @end

@@ -11,6 +11,10 @@
 // common.h 整包拉进决策引擎——头文件污染越小，接线越不容易撬动既有编译单元。
 extern BOOL getLocalBool(NSString *key, BOOL defaultValue);
 extern int getLocalInt(NSString *key, int defaultValue);
+extern NSString *getLogPath(void);
+
+static const unsigned long long kJYLogMaxBytes = 128 * 1024;
+static const unsigned long long kJYLogKeepBytes = 64 * 1024;
 
 // 与 CLThermalSimTweak.m 同名通道（daemon 写、tweak 读后下发热模拟档位）。
 static NSString *const CLGovernorApplyNotification = @"com.jy.charge.thermalapply";
@@ -25,9 +29,76 @@ static NSString *const CLGovernorApplyNotification = @"com.jy.charge.thermalappl
 @property (nonatomic) long long lastAmpMa;         // 最近一次实测电流（原始符号）
 @property (nonatomic) BOOL lastCharging;
 @property (nonatomic) CLOfflineAdvisory *advisory;   // 跨轮复用：tp_policy 状态在实例内
+// 日志节流：档位/动作变化必记，其余每 30 秒一条心跳。
+@property (nonatomic) NSInteger loggedLevel;
+@property (nonatomic) NSInteger loggedAction;
+@property (nonatomic) NSTimeInterval lastLogTs;
+@property (nonatomic) BOOL hasLoggedOnce;
+- (void)logEvaluation:(NSInteger)level action:(NSInteger)action reason:(NSString *)reason;
 @end
 
 @implementation CLThermalGovernor
+
++ (NSString *)logPath {
+    static NSString *path = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        NSString *dir = [getLogPath() stringByDeletingLastPathComponent];
+        if (dir.length == 0) dir = @"/var/mobile/Library/Logs";
+        path = [dir stringByAppendingPathComponent:@"jys-governor.log"];
+        [[NSFileManager defaultManager] createDirectoryAtPath:dir
+                                  withIntermediateDirectories:YES
+                                                   attributes:nil
+                                                        error:NULL];
+    });
+    return path;
+}
+
++ (void)appendLogLine:(NSString *)line {
+    NSString *path = [self logPath];
+    NSData *data = [[line stringByAppendingString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    if (![fm fileExistsAtPath:path]) {
+        [data writeToFile:path atomically:YES];
+        return;
+    }
+    NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:path];
+    if (fh == nil) {
+        [data writeToFile:path atomically:YES];
+        return;
+    }
+    @try {
+        [fh seekToEndOfFile];
+        [fh writeData:data];
+        [fh closeFile];
+    } @catch (NSException *e) {
+        [fh closeFile];
+    }
+    // 体积上限：超过 128KB 保留最近 64KB（1Hz 约 20 分钟写满，频率可接受）。
+    NSDictionary *attrs = [fm attributesOfItemAtPath:path error:NULL];
+    if ([attrs fileSize] > kJYLogMaxBytes) {
+        NSData *all = [NSData dataWithContentsOfFile:path];
+        if (all.length > kJYLogKeepBytes) {
+            NSData *tail = [all subdataWithRange:NSMakeRange(all.length - kJYLogKeepBytes,
+                                                             kJYLogKeepBytes)];
+            [tail writeToFile:path atomically:YES];
+        }
+    }
+}
+
++ (NSString *)logTailWithMaxLines:(NSUInteger)lines {
+    NSString *text = [NSString stringWithContentsOfFile:[self logPath]
+                                              encoding:NSUTF8StringEncoding
+                                                 error:NULL];
+    if (text.length == 0) return @"";
+    NSArray<NSString *> *all = [text componentsSeparatedByString:@"\n"];
+    NSUInteger n = MIN(lines, all.count);
+    return [[all subarrayWithRange:NSMakeRange(all.count - n, n)] componentsJoinedByString:@"\n"];
+}
+
++ (void)clearLog {
+    [[NSFileManager defaultManager] removeItemAtPath:[self logPath] error:NULL];
+}
 
 + (instancetype)sharedGovernor {
     static CLThermalGovernor *shared = nil;
@@ -100,10 +171,14 @@ static double CLContinuousSeconds(void) {
     _lastCharging = [bat_info[@"IsCharging"] boolValue];
 
     if (self.advisory == nil) self.advisory = [CLOfflineAdvisory new];
+    // 采样戳必须给：tp_step 的硬校验要求 has_age && age_s <= max_age_s，
+    // 传 nil 会让每一轮都被判成"样本过期"，直接 release_level() → 档位永远是 0。
+    // 本轮 bat_info 就是刚刚从 IOKit 读到的，采样时刻 = 当前单调时钟。
+    double now = CLContinuousSeconds();
     NSDictionary *envelope = [self.advisory observeBattery:bat_info
                                                   settings:[self governorSettings]
-                                              monotonicNow:CLContinuousSeconds()
-                                         monotonicSampleAt:nil
+                                              monotonicNow:now
+                                         monotonicSampleAt:@(now)
                                                  ownership:@"ours"];
     NSDictionary *thermal = [envelope[@"thermal"] isKindOfClass:[NSDictionary class]]
                                 ? envelope[@"thermal"] : nil;
@@ -129,6 +204,8 @@ static double CLContinuousSeconds(void) {
                            ? [thermal[@"action"] integerValue] : TP_NONE;
     NSString *reason = [thermal[@"reason"] isKindOfClass:[NSString class]]
                            ? thermal[@"reason"] : @"?";
+
+    [self logEvaluation:level action:action reason:reason];
 
     // emergency：策略内核判 TP_MANUAL_STOP_REVIEW（temp >= emergency）→
     // heavy 档 + 布尔停充兜底（经 daemon 注入的 emergencyHandler）。
@@ -169,6 +246,36 @@ static double CLContinuousSeconds(void) {
     if (self.emergencyHandler) self.emergencyHandler(stop);
     NSLog(@"[CLGovernor] actuation %@ (emergency=%d capacity_latch=%d)",
           stop ? @"STOP" : @"RESUME", _emergencyLatched, _capacityLatched);
+}
+
+- (void)logEvaluation:(NSInteger)level action:(NSInteger)action reason:(NSString *)reason {
+    NSTimeInterval now = [NSDate timeIntervalSince1970];
+    BOOL changed = !self.hasLoggedOnce
+                   || level != self.loggedLevel
+                   || action != self.loggedAction;
+    // 心跳 30 秒：即使档位不变也能看到温度/电流在动，避免"日志空白 = 没跑"的误判。
+    BOOL heartbeat = (now - self.lastLogTs) >= 30.0;
+    if (!changed && !heartbeat) return;
+    self.hasLoggedOnce = YES;
+    self.loggedLevel = level;
+    self.loggedAction = action;
+    self.lastLogTs = now;
+
+    static NSDateFormatter *fmt = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        fmt = [[NSDateFormatter alloc] init];
+        fmt.dateFormat = @"MM-dd HH:mm:ss";
+    });
+    NSString *line = [NSString stringWithFormat:
+        @"%@ temp=%.1fC lvl=%ld act=%ld reason=%@ amp=%lldmA chg=%d en=%d rise=%d/%d/%d",
+        [fmt stringFromDate:[NSDate date]], self.lastTempC, (long)level, (long)action, reason,
+        self.lastAmpMa, (int)self.lastCharging,
+        (int)getLocalBool(@"jy_thermal_enabled", YES),
+        getLocalInt(@"jy_rise_light", 35),
+        getLocalInt(@"jy_rise_moderate", 39),
+        getLocalInt(@"jy_emergency", 44)];
+    [CLThermalGovernor appendLogLine:line];
 }
 
 - (void)applyLevel:(CLThermalLevel)level reason:(NSString *)reason {
