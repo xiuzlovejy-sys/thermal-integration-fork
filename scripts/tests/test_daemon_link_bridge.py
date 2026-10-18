@@ -146,7 +146,7 @@ class DaemonLinkBridgeTests(unittest.TestCase):
             "geteuid()",
             "resolveJbRootFromSelfExe()",
             '@"/Applications/ChargeLimiter.app/ChargeLimiterDaemon"',
-            '@"Library/LaunchDaemons/com.chargelimiter.mod.plist"',
+            '@"Library/LaunchDaemons/com.jy.charge.plist"',
             "NSPropertyListSerialization",
             '@"Program"',
             '@"ProgramArguments"',

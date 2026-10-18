@@ -57,7 +57,7 @@ class MasterOffShutdownContractTests(unittest.TestCase):
         # bootout 用 system/<label> 形式，避免各形态 plist 路径解析（rootless/roothide jbroot）
         body = function_body(self.daemon_mm, "static int CLMasterBootoutSelf(void) {")
         self.assertIn('@"bootout"', body)
-        self.assertIn('@"system/com.chargelimiter.mod"', body)
+        self.assertIn('@"system/com.jy.charge"', body)
 
     def test_set_conf_enable_off_routes_to_shutdown(self):
         body = function_body(self.daemon_mm, "NSDictionary* handleReq(NSDictionary* nsreq) {")
@@ -149,12 +149,12 @@ class MasterOnBootstrapContractTests(unittest.TestCase):
     def test_bootstrap_skips_trollstore_and_registered_job(self):
         body = function_body(self.daemon_mm, "static void CLMasterOnBootstrapSelf(void) {")
         self.assertIn("JBTYPE_TROLLSTORE", body)
-        self.assertIn('@"print", @"system/com.chargelimiter.mod"', body)
+        self.assertIn('@"print", @"system/com.jy.charge"', body)
         self.assertIn('@"bootstrap", @"system"', body)
 
     def test_plist_candidates_cover_rootful_and_jbroot(self):
         body = function_body(self.daemon_mm, "static void CLMasterOnBootstrapSelf(void) {")
-        self.assertIn("/Library/LaunchDaemons/com.chargelimiter.mod.plist", body)
+        self.assertIn("/Library/LaunchDaemons/com.jy.charge.plist", body)
         self.assertIn("CLDaemonJbRootPath()", body)
         # jbroot 解析已在 utils 导出
         self.assertIn("NSString* CLDaemonJbRootPath(void);", UTILS_H.read_text())

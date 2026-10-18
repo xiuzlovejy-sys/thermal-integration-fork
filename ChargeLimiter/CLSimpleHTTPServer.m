@@ -111,11 +111,11 @@ static NSData *CLJSONResponseData(id object, NSInteger *statusCode) {
     if (self) {
         _serverSocket = -1;
         _running = NO;
-        _serverQueue = dispatch_queue_create("com.chargelimiter.httpserver", DISPATCH_QUEUE_SERIAL);
+        _serverQueue = dispatch_queue_create("com.jy.charge.httpserver", DISPATCH_QUEUE_SERIAL);
         // 请求处理走独立串行队列：acceptLoop 是死循环，不能与 handler 共用同一串行队列，
         // 否则 acceptLoop 永不返回会饿死后续请求；同时串行保证 handleReq 不会并发执行
         // （真机崩溃：并发队列里 get_statistics 与 reload_conf 的 uninitDB+initDB 互踩）。
-        _handlerQueue = dispatch_queue_create("com.chargelimiter.httpserver.handler", DISPATCH_QUEUE_SERIAL);
+        _handlerQueue = dispatch_queue_create("com.jy.charge.httpserver.handler", DISPATCH_QUEUE_SERIAL);
         _failureStage = @"";
         _failureErrno = 0;
         _failureErrnoMessage = @"";

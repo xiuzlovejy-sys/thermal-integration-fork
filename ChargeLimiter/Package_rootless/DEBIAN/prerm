@@ -1,9 +1,9 @@
 #!/bin/sh
 
 APP_DIR="/var/jb/Applications/ChargeLimiter.app"
-DAEMON_PLIST="/var/jb/Library/LaunchDaemons/com.chargelimiter.mod.plist"
-CACHE1="/var/jb/var/mobile/Library/Preferences/com.chargelimiter.mod.containerpath"
-CACHE2="/var/mobile/Library/Preferences/com.chargelimiter.mod.containerpath"
+DAEMON_PLIST="/var/jb/Library/LaunchDaemons/com.jy.charge.plist"
+CACHE1="/var/jb/var/mobile/Library/Preferences/com.jy.charge.containerpath"
+CACHE2="/var/mobile/Library/Preferences/com.jy.charge.containerpath"
 
 resolve_jbroot() {
     for cmd in /usr/bin/jbroot /var/jb/usr/bin/jbroot jbroot; do
@@ -35,7 +35,7 @@ resolve_jbroot() {
 
 CACHE3=""
 if JB_PREFS_DIR="$(resolve_jbroot)"; then
-    CACHE3="$JB_PREFS_DIR/com.chargelimiter.mod.containerpath"
+    CACHE3="$JB_PREFS_DIR/com.jy.charge.containerpath"
 fi
 
 should_cleanup_data() {

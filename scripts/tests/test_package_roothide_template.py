@@ -11,7 +11,7 @@ ROOTHIDE_CTRL = REPO_ROOT / "ChargeLimiter/Package_roothide/DEBIAN/control"
 ROOTHIDE_POST = REPO_ROOT / "ChargeLimiter/Package_roothide/DEBIAN/postinst"
 ROOTHIDE_PRERM = REPO_ROOT / "ChargeLimiter/Package_roothide/DEBIAN/prerm"
 ROOTFUL_POSTRM = REPO_ROOT / "ChargeLimiter/Package/DEBIAN/postrm"
-ROOTFUL_PLIST = REPO_ROOT / "ChargeLimiter/Package/Library/LaunchDaemons/com.chargelimiter.mod.plist"
+ROOTFUL_PLIST = REPO_ROOT / "ChargeLimiter/Package/Library/LaunchDaemons/com.jy.charge.plist"
 BUILD_SCRIPT = REPO_ROOT / "scripts/build_packages.sh"
 
 
@@ -114,17 +114,17 @@ exit 0
                 command_path.write_text(mock, encoding="utf-8")
                 command_path.chmod(0o755)
 
-            plist_path = tmp_path / "Library/LaunchDaemons/com.chargelimiter.mod.plist"
+            plist_path = tmp_path / "Library/LaunchDaemons/com.jy.charge.plist"
             cache_path = tmp_path / "var/mobile/Library/Preferences/containerpath"
             script = source_for(ROOTHIDE_PRERM)
             script = script.replace(
                 'APP_DIR="/Applications/ChargeLimiter.app"',
                 f'APP_DIR="{app_dir}"',
             ).replace(
-                'DAEMON_PLIST="/Library/LaunchDaemons/com.chargelimiter.mod.plist"',
+                'DAEMON_PLIST="/Library/LaunchDaemons/com.jy.charge.plist"',
                 f'DAEMON_PLIST="{plist_path}"',
             ).replace(
-                'CACHE="/var/mobile/Library/Preferences/com.chargelimiter.mod.containerpath"',
+                'CACHE="/var/mobile/Library/Preferences/com.jy.charge.containerpath"',
                 f'CACHE="{cache_path}"',
             )
             script_path = tmp_path / "prerm"
@@ -151,20 +151,20 @@ exit 0
     def test_control_arch(self):
         c = source_for(ROOTHIDE_CTRL)
         self.assertIn("Architecture: iphoneos-arm64e", c)
-        self.assertIn("Package: com.chargelimiter.mod", c)
+        self.assertIn("Package: com.jy.charge", c)
 
     def test_postinst_permissions_and_paths(self):
         s = source_for(ROOTHIDE_POST)
         self.assertIn('APP_DIR="/Applications/ChargeLimiter.app"', s)
-        self.assertIn('DAEMON_PLIST="/Library/LaunchDaemons/com.chargelimiter.mod.plist"', s)
+        self.assertIn('DAEMON_PLIST="/Library/LaunchDaemons/com.jy.charge.plist"', s)
         self.assertIn("repair_shared_data_permissions", s)
 
     def test_shared_roothide_files_are_staged_from_rootful_canonical(self):
         script = source_for(BUILD_SCRIPT)
         self.assertIn('cp -p "$PKG_ROOTFUL_DIR/DEBIAN/postrm" "$STAGE_ROOTHIDE_DIR/DEBIAN/postrm"', script)
-        self.assertIn('"$PKG_ROOTFUL_DIR/Library/LaunchDaemons/com.chargelimiter.mod.plist"', script)
+        self.assertIn('"$PKG_ROOTFUL_DIR/Library/LaunchDaemons/com.jy.charge.plist"', script)
         self.assertIn('chmod 755 "$STAGE_ROOTHIDE_DIR/DEBIAN/postrm"', script)
-        self.assertIn('chmod 644 "$STAGE_ROOTHIDE_DIR/Library/LaunchDaemons/com.chargelimiter.mod.plist"', script)
+        self.assertIn('chmod 644 "$STAGE_ROOTHIDE_DIR/Library/LaunchDaemons/com.jy.charge.plist"', script)
 
     def test_shared_roothide_files_match_rootful_canonical(self):
         self.assertTrue(ROOTFUL_POSTRM.exists())

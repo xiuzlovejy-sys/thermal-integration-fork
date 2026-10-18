@@ -32,7 +32,7 @@ class SharedStoreMigrationContractTests(unittest.TestCase):
         body = mm[idx:idx + 4000]
         # Source cascade: appdata suite then standardUserDefaults.
         self.assertTrue(
-            "com.chargelimiter.mod.appdata" in body or "getAppUserDefaults" in body,
+            "com.jy.charge.appdata" in body or "getAppUserDefaults" in body,
             "must read old appdata suite",
         )
         self.assertIn("standardUserDefaults", body, "must fall back to standardUserDefaults")

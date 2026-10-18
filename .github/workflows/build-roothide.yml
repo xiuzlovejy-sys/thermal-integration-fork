@@ -114,7 +114,7 @@ jobs:
       - name: "Verify deb contents: arm64e ABI caps 0x80 on every Mach-O"
         run: |
           set -euo pipefail
-          DEB=$(ls out/ChargeLimiter_*_roothide_arm64e.deb)
+          DEB=$(ls out/*_roothide_arm64e.deb)
           echo "checking $DEB"
           rm -rf /tmp/debcheck && mkdir -p /tmp/debcheck
           dpkg-deb -x "$DEB" /tmp/debcheck
@@ -147,6 +147,6 @@ jobs:
       - name: Upload roothide deb artifact
         uses: actions/upload-artifact@v4
         with:
-          name: chargelimiter-roothide-arm64e-deb
+          name: jys-charge-roothide-arm64e-deb
           path: out/*.deb
           if-no-files-found: error

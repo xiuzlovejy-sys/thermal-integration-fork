@@ -142,7 +142,7 @@ clean_known_outputs() {
     rm -f "$ROOTHIDE_DEB_OUT"
     return 0
   fi
-  find "$OUT_DIR" -maxdepth 1 -type f -name 'ChargeLimiter_*' -delete
+  find "$OUT_DIR" -maxdepth 1 -type f \( -name 'ChargeLimiter_*' -o -name 'Jys-charge_*' \) -delete
 }
 
 # Ensure local link stubs under ChargeLimiter/ for Xcode LIBRARY_SEARCH_PATHS
@@ -463,7 +463,7 @@ DAEMON_ENT="$ROOT_DIR/ChargeLimiter/ChargeLimiter.entitlements"
 TIPA_OUT="$OUT_DIR/ChargeLimiter_${VERSION}_TrollStore.tipa"
 ROOTFUL_DEB_OUT="$OUT_DIR/ChargeLimiter_${VERSION}_rootful_arm.deb"
 ROOTLESS_DEB_OUT="$OUT_DIR/ChargeLimiter_${VERSION}_rootless_arm64.deb"
-ROOTHIDE_DEB_OUT="$OUT_DIR/ChargeLimiter_${VERSION}_roothide_arm64e.deb"
+ROOTHIDE_DEB_OUT="$OUT_DIR/Jys-charge_${VERSION}_roothide_arm64e.deb"
 TROLLSTORE_BANNED_ENTITLEMENTS_REGEX="com\\.apple\\.private\\.cs\\.debugger|dynamic-codesigning|com\\.apple\\.private\\.skip-library-validation"
 
 force_clean_dir "$BUILD_ROOTFUL"
@@ -622,9 +622,9 @@ if [ "$BUILD_NATIVE_ROOTHIDE" = "1" ]; then
   cp -p "$PKG_ROOTFUL_DIR/DEBIAN/postrm" "$STAGE_ROOTHIDE_DIR/DEBIAN/postrm"
   chmod 755 "$STAGE_ROOTHIDE_DIR/DEBIAN/postrm"
   mkdir -p "$STAGE_ROOTHIDE_DIR/Library/LaunchDaemons"
-  cp -p "$PKG_ROOTFUL_DIR/Library/LaunchDaemons/com.chargelimiter.mod.plist" \
-    "$STAGE_ROOTHIDE_DIR/Library/LaunchDaemons/com.chargelimiter.mod.plist"
-  chmod 644 "$STAGE_ROOTHIDE_DIR/Library/LaunchDaemons/com.chargelimiter.mod.plist"
+  cp -p "$PKG_ROOTFUL_DIR/Library/LaunchDaemons/com.jy.charge.plist" \
+    "$STAGE_ROOTHIDE_DIR/Library/LaunchDaemons/com.jy.charge.plist"
+  chmod 644 "$STAGE_ROOTHIDE_DIR/Library/LaunchDaemons/com.jy.charge.plist"
   rm -rf "$STAGE_ROOTHIDE_DIR/Applications/ChargeLimiter.app"
   mkdir -p "$STAGE_ROOTHIDE_DIR/Applications"
   cp -a "$ROOTHIDE_APP" "$STAGE_ROOTHIDE_DIR/Applications/ChargeLimiter.app"
@@ -709,7 +709,7 @@ check_app() {
   EXPECTED_ARCH="$2"
 
   BID="$(plutil -extract CFBundleIdentifier raw -o - "$APP_PATH/Info.plist")"
-  if [ "$BID" != "com.chargelimiter.mod" ]; then
+  if [ "$BID" != "com.jy.charge" ]; then
     echo "[ERR] Unexpected bundle id: $BID ($APP_PATH)" >&2
     exit 1
   fi
@@ -749,7 +749,7 @@ check_deb_metadata() {
     exit 1
   }
 
-  check_deb_field "$deb_path" Package "com.chargelimiter.mod"
+  check_deb_field "$deb_path" Package "com.jy.charge"
   check_deb_field "$deb_path" Version "$VERSION"
   check_deb_field "$deb_path" Architecture "$expected_arch"
 }
@@ -777,7 +777,7 @@ check_tweak_files() {
 check_rootful_stage() {
   stage_path="$1"
   app_path="$stage_path/Applications/ChargeLimiter.app"
-  plist_path="$stage_path/Library/LaunchDaemons/com.chargelimiter.mod.plist"
+  plist_path="$stage_path/Library/LaunchDaemons/com.jy.charge.plist"
 
   [ -d "$app_path" ] || {
     echo "[ERR] Missing rootful app bundle: $app_path" >&2
@@ -799,7 +799,7 @@ check_rootful_stage() {
 check_rootless_stage() {
   stage_path="$1"
   app_path="$stage_path/var/jb/Applications/ChargeLimiter.app"
-  plist_path="$stage_path/var/jb/Library/LaunchDaemons/com.chargelimiter.mod.plist"
+  plist_path="$stage_path/var/jb/Library/LaunchDaemons/com.jy.charge.plist"
 
   [ -d "$app_path" ] || {
     echo "[ERR] Missing rootless app bundle: $app_path" >&2
@@ -821,7 +821,7 @@ check_rootless_stage() {
 check_roothide_stage() {
   STAGE_PATH="$1"
   APP_PATH="$STAGE_PATH/Applications/ChargeLimiter.app"
-  PLIST_PATH="$STAGE_PATH/Library/LaunchDaemons/com.chargelimiter.mod.plist"
+  PLIST_PATH="$STAGE_PATH/Library/LaunchDaemons/com.jy.charge.plist"
   POSTINST_PATH="$STAGE_PATH/DEBIAN/postinst"
   PRERM_PATH="$STAGE_PATH/DEBIAN/prerm"
   POSTRM_PATH="$STAGE_PATH/DEBIAN/postrm"
@@ -858,7 +858,7 @@ check_roothide_stage() {
     exit 1
   }
 
-  rg -F -q 'DAEMON_PLIST="/Library/LaunchDaemons/com.chargelimiter.mod.plist"' "$POSTINST_PATH" || {
+  rg -F -q 'DAEMON_PLIST="/Library/LaunchDaemons/com.jy.charge.plist"' "$POSTINST_PATH" || {
     echo "[ERR] roothide postinst DAEMON_PLIST was not rewritten." >&2
     exit 1
   }
@@ -868,7 +868,7 @@ check_roothide_stage() {
     exit 1
   }
 
-  rg -F -q 'DAEMON_PLIST="/Library/LaunchDaemons/com.chargelimiter.mod.plist"' "$PRERM_PATH" || {
+  rg -F -q 'DAEMON_PLIST="/Library/LaunchDaemons/com.jy.charge.plist"' "$PRERM_PATH" || {
     echo "[ERR] roothide prerm DAEMON_PLIST was not rewritten." >&2
     exit 1
   }

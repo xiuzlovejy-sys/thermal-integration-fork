@@ -9,6 +9,8 @@
 		<string>en</string>
 		<string>zh-Hans</string>
 	</array>
+	<key>CFBundleDisplayName</key>
+	<string>Jy's charge</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>

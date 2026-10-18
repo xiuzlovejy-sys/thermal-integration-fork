@@ -28,7 +28,7 @@ static NSString* g_appDocumentsPathOverride = nil;
 static NSString* g_runtimeDataRootPath = nil;
 static NSString* g_pathResolutionSource = @"uninitialized";
 static NSDictionary* g_lastConfigWriteDiagnostics = nil;
-static NSString* const kLegacyContainerCacheFileName = @"com.chargelimiter.mod.containerpath";
+static NSString* const kLegacyContainerCacheFileName = @"com.jy.charge.containerpath";
 static NSString* const kRoothideDataRoot = @"/var/mobile/ChargeLimiter";
 static NSString* const kRoothideLegacySharedDataRoot = @"/var/mobile/Library/Application Support/ChargeLimiter";
 typedef const char* (*jbroot_fn_t)(const char* path);
@@ -647,7 +647,7 @@ static NSString* resolveContainerRootByScanning(NSString* bid) {
 static NSString* resolveAppBundleIdentifier() {
     NSString* bid = NSBundle.mainBundle.bundleIdentifier;
     if (bid.length == 0) {
-        return @"com.chargelimiter.mod";
+        return @"com.jy.charge";
     }
     if ([bid containsString:@"ChargeLimiterDaemon"]) {
         NSString* fixed = [bid stringByReplacingOccurrencesOfString:@"ChargeLimiterDaemon" withString:@"ChargeLimiter"];
@@ -853,7 +853,7 @@ int CLRepairRoothideLaunchDaemonPlist(void) {
     }
 
     NSString* plistPath = [jbRoot stringByAppendingPathComponent:
-        @"Library/LaunchDaemons/com.chargelimiter.mod.plist"];
+        @"Library/LaunchDaemons/com.jy.charge.plist"];
     NSError* error = nil;
     NSData* plistData = [NSData dataWithContentsOfFile:plistPath options:0 error:&error];
     if (plistData.length == 0) {
@@ -1685,7 +1685,7 @@ static NSString* configLockFilePath(void) {
     if (dir.length == 0) {
         return nil;
     }
-    return [dir stringByAppendingPathComponent:@"com.chargelimiter.mod.lock"];
+    return [dir stringByAppendingPathComponent:@"com.jy.charge.lock"];
 }
 
 static void repairLockFileOwnership(NSString* lockPath) {
@@ -2084,15 +2084,15 @@ static BOOL isNSUserDefaultsOnlyPlist(NSString* path) {
     // 检查 plist 文件是否只包含 NSUserDefaults 写入的辅助键（非配置数据）
     // 如果是，则不应将其视为"残留配置文件"
     //
-    // 注意：从本版本开始，NSUserDefaults 数据已改为存储在 com.chargelimiter.mod.appdata.plist，
-    // 这个函数主要用于兼容旧版本遗留的 com.chargelimiter.mod.plist 文件。
+    // 注意：从本版本开始，NSUserDefaults 数据已改为存储在 com.jy.charge.appdata.plist，
+    // 这个函数主要用于兼容旧版本遗留的 com.jy.charge.plist 文件。
     NSDictionary* dict = [NSDictionary dictionaryWithContentsOfFile:path];
     if (![dict isKindOfClass:[NSDictionary class]] || dict.count == 0) {
         return NO;
     }
 
     // 旧版本 NSUserDefaults 辅助键列表（迁移检查、版本更新检查等）
-    // 这些键在旧版本中会被写入 standardUserDefaults，即 com.chargelimiter.mod.plist
+    // 这些键在旧版本中会被写入 standardUserDefaults，即 com.jy.charge.plist
     NSSet* userDefaultsOnlyKeys = [NSSet setWithArray:@[
         @"LegacyMigrationCheckedToken",
         @"CLUpdateCheckLastDate",
@@ -3152,10 +3152,10 @@ extern "C" NSDictionary* clRepairDaemonForApp_C(void) {
     out[@"launchctl_path"] = launchctlPath ?: @"";
     out[@"launchctl_exists"] = @([[NSFileManager defaultManager] isExecutableFileAtPath:launchctlPath]);
     NSMutableArray* plistCandidates = [NSMutableArray arrayWithObject:
-        @"/Library/LaunchDaemons/com.chargelimiter.mod.plist"];
+        @"/Library/LaunchDaemons/com.jy.charge.plist"];
     if (jbRoot.length > 0) {
         [plistCandidates addObject:
-            [jbRoot stringByAppendingPathComponent:@"Library/LaunchDaemons/com.chargelimiter.mod.plist"]];
+            [jbRoot stringByAppendingPathComponent:@"Library/LaunchDaemons/com.jy.charge.plist"]];
     }
     NSMutableArray* plistExisting = [NSMutableArray array];
     for (NSString* plist in plistCandidates) {
@@ -3237,7 +3237,7 @@ extern "C" NSDictionary* clRepairDaemonForApp_C(void) {
             NSString* statusOut = nil;
             NSString* statusErr = nil;
             printAttempted = YES;
-            printRc = spawn(@[launchctlPath, @"print", @"system/com.chargelimiter.mod"],
+            printRc = spawn(@[launchctlPath, @"print", @"system/com.jy.charge"],
                             &statusOut, &statusErr, nil, rootFlags, nil);
             printOut = statusErr.length ? statusErr : (statusOut ?: @"");
             if (printOut.length > 4096) {
@@ -3250,7 +3250,7 @@ extern "C" NSDictionary* clRepairDaemonForApp_C(void) {
             }
             NSString* bootOut = nil;
             NSString* bootErr = nil;
-            bootoutRc = spawn(@[launchctlPath, @"bootout", @"system/com.chargelimiter.mod"],
+            bootoutRc = spawn(@[launchctlPath, @"bootout", @"system/com.jy.charge"],
                               &bootOut, &bootErr, nil, rootFlags, nil);
             NSString* splash = bootErr ?: (bootOut ?: @"");
             NSString* bOut = nil;
@@ -3622,8 +3622,8 @@ NSString* getThermalSimulationMode() {
 
 // 模拟档位配置域与执行端（CLThermalSim tweak）共享；通知只作"配置已变"触发信号（design D2）。
 static NSString* const CLThermalPrefsSuite = @"com.apple.cltm";
-static NSString* const CLThermalApplyNotification = @"com.chargelimiter.thermalapply";
-static NSString* const CLThermalSessionNotification = @"com.chargelimiter.thermalsession";
+static NSString* const CLThermalApplyNotification = @"com.jy.charge.thermalapply";
+static NSString* const CLThermalSessionNotification = @"com.jy.charge.thermalsession";
 
 NSString* getThermalConfigMode() {
     if (@available(iOS 11.0, *)) {
@@ -4563,8 +4563,8 @@ extern "C" NSUserDefaults* getAppUserDefaults(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         // 使用自定义 suite name，确保数据存储在 app 容器而不是系统 Preferences
-        // 注意：这会在 app 容器的 Library/Preferences/ 下创建 com.chargelimiter.mod.appdata.plist
-        appDefaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.chargelimiter.mod.appdata"];
+        // 注意：这会在 app 容器的 Library/Preferences/ 下创建 com.jy.charge.appdata.plist
+        appDefaults = [[NSUserDefaults alloc] initWithSuiteName:@"com.jy.charge.appdata"];
         if (appDefaults == nil) {
             NSLog2(@"[CL] WARNING: Failed to create app suite NSUserDefaults, falling back to standard");
             appDefaults = [NSUserDefaults standardUserDefaults];
@@ -4575,7 +4575,7 @@ extern "C" NSUserDefaults* getAppUserDefaults(void) {
 
 // 旧版本把以下设置写入 NSUserDefaults standardUserDefaults，在 roothide 下该路径
 // 无法随 jbroot 持久化，重启/重新越狱后会丢失。这里在首次加载配置时把它们一次性
-// 迁移进 CLSettingsStore（com.chargelimiter.mod.plist），迁移后清理旧值避免回写。
+// 迁移进 CLSettingsStore（com.jy.charge.plist），迁移后清理旧值避免回写。
 // 直接操作传入的 preferences 字典，不调用 setlocalKV/[CLSettingsStore shared]，
 // 以免在 store 初始化期间重入造成死锁。返回是否发生了迁移。
 static BOOL migrateLegacyUserDefaultsIntoPreferences(NSMutableDictionary* preferences) {
@@ -5144,7 +5144,7 @@ BOOL CLMigrateAppSettingsToSharedStoreIfNeeded(void) {
         }
 
         // 直接读旧 appdata suite（不再经过独立 App store）。
-        NSUserDefaults* suite = [[NSUserDefaults alloc] initWithSuiteName:@"com.chargelimiter.mod.appdata"];
+        NSUserDefaults* suite = [[NSUserDefaults alloc] initWithSuiteName:@"com.jy.charge.appdata"];
         if (suite == nil) {
             suite = getAppUserDefaults();
         }

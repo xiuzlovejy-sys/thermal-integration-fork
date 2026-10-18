@@ -1,8 +1,8 @@
 #!/bin/sh
 
 APP_DIR="/var/jb/Applications/ChargeLimiter.app"
-CACHE1="/var/jb/var/mobile/Library/Preferences/com.chargelimiter.mod.containerpath"
-CACHE2="/var/mobile/Library/Preferences/com.chargelimiter.mod.containerpath"
+CACHE1="/var/jb/var/mobile/Library/Preferences/com.jy.charge.containerpath"
+CACHE2="/var/mobile/Library/Preferences/com.jy.charge.containerpath"
 
 resolve_jbroot() {
     # roothide preferred: use jbroot tool if available.
@@ -36,7 +36,7 @@ resolve_jbroot() {
 
 CACHE3=""
 if JB_PREFS_DIR="$(resolve_jbroot)"; then
-    CACHE3="$JB_PREFS_DIR/com.chargelimiter.mod.containerpath"
+    CACHE3="$JB_PREFS_DIR/com.jy.charge.containerpath"
 fi
 
 case "$1" in

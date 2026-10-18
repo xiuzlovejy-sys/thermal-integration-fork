@@ -26,9 +26,34 @@ ALLOW = ('ChargeLimiter/OfflineAdvisory/', 'tests/offline_advisory/',
          # OfflineAdvisory 5 文件进 daemon target。下方 wiring_guard() 强制执行。
          'ChargeLimiter/daemon.mm',
          'ChargeLimiter.xcodeproj/project.pbxproj',
+         # Jy's charge 品牌化偏离（2026-10-18 用户授权）：
+         # 安装身份 com.chargelimiter.mod -> com.jy.charge（不覆盖原生 CL），
+         # 波及产品源码身份常量、打包模板、plist、上游测试中的身份断言。
+         'ChargeLimiter/common.h',
+         'ChargeLimiter/utils.mm',
+         'ChargeLimiter/CLSimpleHTTPServer.m',
+         'ChargeLimiter/ChargeLimiter.app.entitlements',
+         'ChargeLimiter/ChargeLimiter.app.jb.entitlements',
+         'ChargeLimiter/ChargeLimiter.entitlements',
+         'ChargeLimiter/Tweak/CLThermalSimTweak.m',
+         'ChargeLimiter/Package/',
+         'ChargeLimiter/Package_roothide/',
+         'ChargeLimiter/Package_rootless/',
+         # Jy's charge 主界面（2026-10-18）：简约一屏温控 UI + 入口改为 Butler，
+         # 上游设置界面保留在「更多设置」下，能力不删减。
+         'ChargeLimiter/UIKit/CLButlerViewController.h',
+         'ChargeLimiter/UIKit/CLButlerViewController.m',
+         'ChargeLimiter/UIKit/Controllers/CLMainViewController.m',
+         # 桌面显示名（iOS 主屏）：只改 CFBundleDisplayName，不动 PRODUCT_NAME
+         # —— PRODUCT_NAME 决定 .app 目录名，打包脚本硬编码 ChargeLimiter.app。
+         'ChargeLimiter/Info.plist',
+         'ChargeLimiter/Assets.xcassets/AppIcon.appiconset/',
+         'scripts/tests/',
+         'tests/test_master_off_contract.py',
          # pbxproj 注册工具（可复现部署脚本，2026-10-18 接线时使用）:
          'register_offline_advisory.py',
          'register_governor.py',
+         'register_butler_ui.py',
          'out/', 'build_rootful/', 'build_rootless/', 'build_roothide/', 'Payload/',
          'ChargeLimiter/libroot.a', 'ChargeLimiter/libroothide.tbd')
 
@@ -81,13 +106,50 @@ def wiring_guard():
 
     assert '#import "CLOfflineAdvisory.h"' in governor, 'governor missing advisory import'
     assert 'observeBattery:' in governor, 'governor missing observeBattery call'
+    # actuator 黑名单只查代码行（注释可提及机制名）
+    gov_code = '\n'.join(ln for ln in governor.splitlines()
+                         if not ln.strip().startswith('//'))
     for bad in ('applyChargePolicy', 'setInflowStatus', 'IORegistryEntrySetCFProperties'):
-        assert bad not in governor, f'governor.mm must not actuate: {bad}'
-    assert 'notify_set_state' in governor, 'governor missing notify channel write'
+        assert bad not in gov_code, f'governor.mm must not actuate: {bad}'
+    assert 'notify_set_state' in gov_code, 'governor missing notify channel write'
 
     for f in ('thermal_policy.c', 'native_capacity.c', 'temperature_stop.c',
               'triple_advisory.c', 'CLOfflineAdvisory.mm', 'CLThermalGovernor.mm'):
         assert f in project, f'pbxproj missing registration: {f}'
+
+
+def branding_guard():
+    """Jy's charge 品牌化守卫（2026-10-18 用户授权改名）。
+
+    安装身份 com.jy.charge（与原生 com.chargelimiter.mod 隔离，不覆盖安装）；
+    三个 control 的 Package/Name/Version 必须为新身份；被跟踪树不得残留旧 id
+    （仅查文本文件——二进制构建缓存不承载身份语义）。
+    """
+    import subprocess
+
+    def _is_text(rel):
+        try:
+            (ROOT / rel).read_bytes().decode('utf-8')
+            return True
+        except (UnicodeDecodeError, OSError):
+            return False
+
+    for rel in ('ChargeLimiter/Package/DEBIAN/control',
+                'ChargeLimiter/Package_roothide/DEBIAN/control',
+                'ChargeLimiter/Package_rootless/DEBIAN/control'):
+        text = (ROOT / rel).read_text()
+        assert 'Package: com.jy.charge' in text, f'{rel}: package id not rebranded'
+        assert "Name: Jy's charge" in text, f'{rel}: name not rebranded'
+        assert 'Version: 1.0.0' in text, f'{rel}: version not rebranded'
+    tracked = subprocess.run(['git', 'ls-files'], capture_output=True, text=True,
+                             check=True).stdout.split()
+    stale = [p for p in tracked
+             if p.startswith(('ChargeLimiter/', 'scripts/', 'tests/'))
+             and 'tests/offline_advisory/' not in p   # 守卫代码自身可含旧 id 字面量
+             and 'build_roothide' not in p
+             and _is_text(p)
+             and b'com.chargelimiter' in (ROOT / p).read_bytes()]
+    assert not stale, f'stale old package id in: {stale[:8]}'
 
 
 def audit():
@@ -107,6 +169,7 @@ def audit():
     live = (ROOT/'ChargeLimiter/daemon.mm').read_text()
     project = (ROOT/'ChargeLimiter.xcodeproj/project.pbxproj').read_text()
     wiring_guard()
+    branding_guard()
     print(f'PASS: {len(originals) - len(diverged)} baseline files unchanged; '
           f'{len(diverged)} allowlisted divergence(s) {diverged}; '
           f'{len(additional)} allowlisted offline additions; no daemon/project registration')

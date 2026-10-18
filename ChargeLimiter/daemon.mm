@@ -122,6 +122,10 @@ static NSTimer* g_disableInflowRetryTimer = nil;
 static NSTimer* g_trollStoreBundleCheckTimer = nil;
 static int g_disableInflowRetryAttemptsRemaining = 0;
 static BOOL g_chargeCommandEnabled = YES;
+// Jy's charge 温控紧急停充（governor 44℃ 兜底）：
+// applyChargePolicy 的最高优先级分支读它——避免状态机下一轮把停充重新放开
+// （否则 governor 与策略机每轮互相覆盖）。清除后策略机自然恢复。
+static BOOL g_jyThermalEmergencyStop = NO;
 static NSString* g_policyState = @"battery";
 static NSString* g_policyReason = @"daemon_boot";
 static NSString* g_lastPolicyChangeReason = @"daemon_boot";
@@ -161,8 +165,8 @@ static const NSUInteger kPolicyEventDBLimit = 5000;
 static const int kDisableInflowRetryMaxAttempts = 3;
 static const NSTimeInterval kDisableInflowRetryDelaySeconds = 0.6;
 static const NSTimeInterval kPredictiveInhibitFallbackVerifyDelaySeconds = 8.0;
-static NSString* const kDaemonResetAndExitNotifyName = @"com.chargelimiter.mod.daemon.reset_and_exit";
-static NSString* const kDaemonRestoreNotifyName = @"com.chargelimiter.mod.daemon.restore";
+static NSString* const kDaemonResetAndExitNotifyName = @"com.jy.charge.daemon.reset_and_exit";
+static NSString* const kDaemonRestoreNotifyName = @"com.jy.charge.daemon.restore";
 
 // iOS 17 禁流态守卫：禁流态下 ExternalConnected/ExternalChargeCapable 由系统间接派生，息屏周期性刷新会抖动，
 // 不能当插电边沿判据。此函数用语义判定当前是否处于禁流态：用户开关 adv_disable_inflow=YES，或上一轮
@@ -3370,7 +3374,7 @@ static NSString* identifierForNotificationKey(NSString* key) {
     if (key.length == 0) {
         return nil;
     }
-    return [NSString stringWithFormat:@"com.chargelimiter.noti.%@", key];
+    return [NSString stringWithFormat:@"com.jy.charge.noti.%@", key];
 }
 
 static BOOL shouldSendNotificationForKey(NSString* key) {
@@ -4558,6 +4562,17 @@ static void applyChargePolicy(NSDictionary* oldInfo, NSDictionary* info) {
     }
     // 优先级: 电量极低 > 停充(电量>温度) > 充电(电量>温度) > 插电
     do {
+        // 温控紧急停充（governor 判定 temp >= 44℃，优先级=0——高于一切策略）。
+        // 标志由 governor 的 emergencyHandler 维护，这里是唯一消费点：
+        // 状态机在场时它必须压住后续所有"恢复充电"分支，否则每轮互相覆盖。
+        if (is_adaptor_connected && g_jyThermalEmergencyStop) {
+            if (g_chargeCommandEnabled || is_charging || predictive_inhibit_active) {
+                setBatteryStatus(NO);
+            }
+            nextPolicyState = @"thermal_emergency";
+            nextPolicyReason = @"governor_emergency_stop";
+            break;
+        }
         if (is_adaptor_connected && capacity.intValue <= 5) { // 电量极低,优先级=1
             // 防止误用或意外造成无法充电
             if (is_adaptor_connected && (!g_chargeCommandEnabled || !is_charging || predictive_inhibit_active)) {
@@ -4763,10 +4778,12 @@ static void evaluateFullChargeSchedule(BOOL forceApply) {
 static void clObserveOfflineAdvisory(NSDictionary* bat_info) {
     CLThermalGovernor* governor = [CLThermalGovernor sharedGovernor];
     if (governor.emergencyHandler == nil) {
+        // emergency = 温度达到紧急阈值（默认 44℃）。走上游验证过的停充原语
+        // setChargeStatus（含 iOS17 override + iOS16 回退 + 写入校验），
+        // 而不是裸写单个 IOKit key；同时置策略机高优先级标志防止下一轮被放开。
         governor.emergencyHandler = ^(BOOL stop) {
-            io_service_t serv = getIOPMPSServ();
-            if (serv == IO_OBJECT_NULL) return;
-            setInflowStatusOverride(serv, stop ? NO : YES);
+            g_jyThermalEmergencyStop = stop;
+            setChargeStatus(!stop);
         };
     }
     [governor evaluateBattery:bat_info];
@@ -4989,7 +5006,7 @@ static int CLMasterLaunchctl(NSArray* args) {
 // B2：从 launchd 注销自身（service target 形式）。返回 0=已注销（本进程随即被 SIGTERM
 // 终止，正常情况下读不到返回值）；非 0=job 未注册/launchctl 不可用，调用方直接 exit。
 static int CLMasterBootoutSelf(void) {
-    return CLMasterLaunchctl(@[@"bootout", @"system/com.chargelimiter.mod"]);
+    return CLMasterLaunchctl(@[@"bootout", @"system/com.jy.charge"]);
 }
 
 // B6：恢复 launchd 常驻注册。已注册（print rc==0）则跳过；TrollStore 无 launchd 直接返回。
@@ -4997,16 +5014,16 @@ static void CLMasterOnBootstrapSelf(void) {
     if (g_jbtype == JBTYPE_TROLLSTORE) {
         return;
     }
-    int printRc = CLMasterLaunchctl(@[@"print", @"system/com.chargelimiter.mod"]);
+    int printRc = CLMasterLaunchctl(@[@"print", @"system/com.jy.charge"]);
     if (printRc == 0) {
         return;   // 常驻态已在 launchd 注册
     }
     NSString* jbRoot = CLDaemonJbRootPath();
     NSMutableArray* plists = [NSMutableArray arrayWithObject:
-        @"/Library/LaunchDaemons/com.chargelimiter.mod.plist"];
+        @"/Library/LaunchDaemons/com.jy.charge.plist"];
     if (jbRoot.length > 0) {
         [plists addObject:[jbRoot stringByAppendingPathComponent:
-            @"Library/LaunchDaemons/com.chargelimiter.mod.plist"]];
+            @"Library/LaunchDaemons/com.jy.charge.plist"]];
     }
     for (NSString* plist in plists) {
         if (![[NSFileManager defaultManager] fileExistsAtPath:plist]) {
@@ -5107,6 +5124,17 @@ NSDictionary* handleReq(NSDictionary* nsreq) {
             kv[@"serv_boot"] = @(g_serv_boot);
             kv[@"sys_boot"] = @(get_sys_boottime());
             kv[@"thermal_simulate_mode"] = getThermalSimulationMode();
+            // Jy's charge 温控闭环实时状态（App 主界面轮询展示）。
+            // 只读快照：档位 / 是否停充 / 触发来源。作动仍只发生在 governor 内。
+            NSDictionary* govState = [[CLThermalGovernor sharedGovernor] stateSnapshot];
+            kv[@"jy_gov_level"] = govState[@"level"] ?: @0;
+            kv[@"jy_gov_stopped"] = govState[@"stopped"] ?: @NO;
+            kv[@"jy_gov_emergency"] = govState[@"emergency"] ?: @NO;
+            kv[@"jy_gov_capacity"] = govState[@"capacity"] ?: @NO;
+            // 实测温度/电流：界面与日志据此自证"档位是否带来电流变化"。
+            kv[@"jy_gov_temp"] = govState[@"temp_c"] ?: @0;
+            kv[@"jy_gov_amp"] = govState[@"amp_ma"] ?: @0;
+            kv[@"jy_gov_charging"] = govState[@"charging"] ?: @NO;
             // 生效验证诊断（design D5）：配置档位 + 最近一次应用结果，区分"已配置"与"已生效"。
             kv[@"thermal_config_mode"] = getThermalConfigMode();
             // 生效范围（thermal-sim-settings「当前生效」行）：与集中决策函数同一处裁决
@@ -5830,7 +5858,7 @@ void detectUPSBattery() {
     content.title = title;
     content.body = msg;
     content.sound = UNNotificationSound.defaultSound;
-    NSString* stableIdentifier = identifier.length > 0 ? identifier : @"com.chargelimiter.noti.generic";
+    NSString* stableIdentifier = identifier.length > 0 ? identifier : @"com.jy.charge.noti.generic";
     [center removePendingNotificationRequestsWithIdentifiers:@[stableIdentifier]];
     [center removeDeliveredNotificationsWithIdentifiers:@[stableIdentifier]];
     UNNotificationRequest* request = [UNNotificationRequest requestWithIdentifier:stableIdentifier content:content trigger:nil];

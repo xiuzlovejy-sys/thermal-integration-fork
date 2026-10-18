@@ -6,7 +6,7 @@
 //
 
 #import "CLMainViewController.h"
-#import "CLSettingsViewController.h"
+#import "../CLButlerViewController.h"
 
 @interface CLMainViewController ()
 @property (nonatomic, strong) UINavigationController *navController;
@@ -16,12 +16,11 @@
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    
-    // 创建设置界面
-    CLSettingsViewController *settingsVC = [[CLSettingsViewController alloc] init];
-    
-    // 包装到导航控制器
-    self.navController = [[UINavigationController alloc] initWithRootViewController:settingsVC];
+
+    // 主界面 = Jy's charge 温控一屏（简约）；「更多设置」推入原设置界面，
+    // 上游能力（限流/停充/热模拟/诊断）全部保留，不牺牲功能。
+    CLButlerViewController *butlerVC = [[CLButlerViewController alloc] init];
+    self.navController = [[UINavigationController alloc] initWithRootViewController:butlerVC];
     self.navController.navigationBarHidden = YES;
     
     // 添加为子控制器

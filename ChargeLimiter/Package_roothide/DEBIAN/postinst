@@ -1,11 +1,11 @@
 #!/bin/sh
 
 APP_DIR="/Applications/ChargeLimiter.app"
-DAEMON_PLIST="/Library/LaunchDaemons/com.chargelimiter.mod.plist"
-CACHE="/var/mobile/Library/Preferences/com.chargelimiter.mod.containerpath"
+DAEMON_PLIST="/Library/LaunchDaemons/com.jy.charge.plist"
+CACHE="/var/mobile/Library/Preferences/com.jy.charge.containerpath"
 
 # 修复共享配置数据目录权限：daemon 以 root 运行时会以 root:wheel 创建文件，
-# 导致 mobile App 无法以原子替换方式写入 com.chargelimiter.mod.plist。
+# 导致 mobile App 无法以原子替换方式写入 com.jy.charge.plist。
 # 原生 roothide 安装时 maintainer 脚本已在 jbroot 命名空间内，
 # /var/mobile/ChargeLimiter 按 jbroot 逻辑路径书写即可（不要写成 /rootfs/...）。
 DATA_DIR="/var/mobile/ChargeLimiter"
@@ -20,7 +20,7 @@ repair_shared_data_permissions() {
         chown mobile:mobile "$DATA_DIR"
         chmod 0750 "$DATA_DIR"
     fi
-    for conf_path in "$DATA_DIR"/com.chargelimiter.mod.plist; do
+    for conf_path in "$DATA_DIR"/com.jy.charge.plist; do
         if [ -e "$conf_path" ]; then
             chown mobile:mobile "$conf_path"
             chmod 0640 "$conf_path"
@@ -131,7 +131,7 @@ fi
 
 # 清理新旧域的可能残留；bootstrap/load 一律用真实路径——真实 launchd
 # 看不到 jbroot 逻辑路径。label 形式兜底卸载旧版本按旧路径注册的残留。
-"$LAUNCHCTL_BIN" bootout system/com.chargelimiter.mod 2>/dev/null
+"$LAUNCHCTL_BIN" bootout system/com.jy.charge 2>/dev/null
 "$LAUNCHCTL_BIN" bootout system "$REAL_PLIST" 2>/dev/null
 "$LAUNCHCTL_BIN" bootout user/foreground "$REAL_PLIST" 2>/dev/null
 if ! "$LAUNCHCTL_BIN" bootstrap system "$REAL_PLIST" 2>/dev/null; then

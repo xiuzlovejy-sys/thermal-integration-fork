@@ -34,7 +34,7 @@ typedef const struct __IOHIDEvent* IOHIDEventRef;
 
 #define LOG_FILENAME        "aldente.log"
 #define DB_FILENAME         "aldente.db"
-#define CONFIG_PLIST_FILENAME       "com.chargelimiter.mod.plist"
+#define CONFIG_PLIST_FILENAME       "com.jy.charge.plist"
 #define LEGACY_CONF_FILENAME        "aldente.conf"
 
 #endif // common_h

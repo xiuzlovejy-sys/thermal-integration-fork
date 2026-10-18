@@ -1,8 +1,8 @@
 #!/bin/sh
 
 APP_DIR="/Applications/ChargeLimiter.app"
-DAEMON_PLIST="/Library/LaunchDaemons/com.chargelimiter.mod.plist"
-CACHE="/var/mobile/Library/Preferences/com.chargelimiter.mod.containerpath"
+DAEMON_PLIST="/Library/LaunchDaemons/com.jy.charge.plist"
+CACHE="/var/mobile/Library/Preferences/com.jy.charge.containerpath"
 
 should_cleanup_data() {
     action="$1"

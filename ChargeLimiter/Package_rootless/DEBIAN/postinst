@@ -1,9 +1,9 @@
 #!/bin/sh
 
 APP_DIR="/var/jb/Applications/ChargeLimiter.app"
-DAEMON_PLIST="/var/jb/Library/LaunchDaemons/com.chargelimiter.mod.plist"
-CACHE1="/var/jb/var/mobile/Library/Preferences/com.chargelimiter.mod.containerpath"
-CACHE2="/var/mobile/Library/Preferences/com.chargelimiter.mod.containerpath"
+DAEMON_PLIST="/var/jb/Library/LaunchDaemons/com.jy.charge.plist"
+CACHE1="/var/jb/var/mobile/Library/Preferences/com.jy.charge.containerpath"
+CACHE2="/var/mobile/Library/Preferences/com.jy.charge.containerpath"
 
 # 共享配置数据的逻辑路径。这里特意用变量间接传递，避免在 roothide 打包转换
 # (rewrite_roothide_maintainer_script) 时被 sed 改写成 /rootfs/var/... 的物理
@@ -39,7 +39,7 @@ resolve_jbroot() {
 }
 
 # 解析共享数据目录的真实物理路径（jbroot 根下的对应位置），并以 mobile:mobile
-# 校正权限，确保 mobile App 能以原子方式写入 com.chargelimiter.mod.plist。
+# 校正权限，确保 mobile App 能以原子方式写入 com.jy.charge.plist。
 resolve_cl_data_root() {
     for cmd in /usr/bin/jbroot /var/jb/usr/bin/jbroot jbroot; do
         if command -v "$cmd" >/dev/null 2>&1; then
@@ -63,7 +63,7 @@ repair_shared_data_permissions() {
     if data_root="$(resolve_cl_data_root)" && [ -n "$data_root" ] && [ -d "$data_root" ]; then
         chown mobile:mobile "$data_root"
         chmod 0750 "$data_root"
-        conf_path="$data_root/com.chargelimiter.mod.plist"
+        conf_path="$data_root/com.jy.charge.plist"
         if [ -e "$conf_path" ]; then
             chown mobile:mobile "$conf_path"
             chmod 0640 "$conf_path"
@@ -73,7 +73,7 @@ repair_shared_data_permissions() {
 
 CACHE3=""
 if JB_PREFS_DIR="$(resolve_jbroot)"; then
-    CACHE3="$JB_PREFS_DIR/com.chargelimiter.mod.containerpath"
+    CACHE3="$JB_PREFS_DIR/com.jy.charge.containerpath"
 fi
 
 chown -R root:wheel "$APP_DIR"

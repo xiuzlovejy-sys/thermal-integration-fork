@@ -3,7 +3,7 @@
 /* 充电管家温控决策引擎（2026-10-18 用户授权接线）。
  * 温度闭环 -> Powercuff 式热模拟档位（柔性调控）：实时温度经 thermal_policy
  * 内核（分级阈值 + 滞回 + min_hold）产出策略档位，映射为热模拟档位后经
- * 内核 notify 通道 com.chargelimiter.thermalapply 下发——由注入
+ * 内核 notify 通道 com.jy.charge.thermalapply 下发——由注入
  * thermalmonitord 的 CLThermalSimTweak 执行 putDeviceInThermalSimulationMode:，
  * PMIC 按模拟温度平滑降功率（非通断、无握手冲击）。
  * 布尔停充仅在 emergency 兜底，且只经由 emergencyHandler 受控通道。 */
@@ -33,6 +33,11 @@ typedef NS_ENUM(uint64_t, CLThermalLevel) {
 // 每轮电池事件调用（串行事件流）。bat_info: getBatInfo/getBatInfoWithServ 快照
 // （Temperature 厘摄氏度、InstantAmperage、IsCharging、ExternalConnected）。
 - (void)evaluateBattery:(NSDictionary *)bat_info;
+
+// 只读状态快照（get_conf 上报给 App）：level / stopped / emergency / capacity。
+// temp_c / amp_ma 为最近一次电池事件实测值——App 与日志据此判断"档位是否真的
+// 带来了电流变化"（柔性调控的唯一可观测证据，控制器本身不臆造效果）。
+- (NSDictionary *)stateSnapshot;
 
 @end
 

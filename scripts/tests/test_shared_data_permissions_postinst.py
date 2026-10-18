@@ -43,7 +43,7 @@ class SharedDataPermissionsPostinstTests(unittest.TestCase):
         self.assertNotIn("/var/jb/", source)
         self.assertNotIn("/rootfs/var/mobile/ChargeLimiter", source)
         self.assertIn('APP_DIR="/Applications/ChargeLimiter.app"', source)
-        self.assertIn('DAEMON_PLIST="/Library/LaunchDaemons/com.chargelimiter.mod.plist"', source)
+        self.assertIn('DAEMON_PLIST="/Library/LaunchDaemons/com.jy.charge.plist"', source)
 
 
 if __name__ == "__main__":

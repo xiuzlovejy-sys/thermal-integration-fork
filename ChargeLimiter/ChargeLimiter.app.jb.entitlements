@@ -5,7 +5,7 @@
 	<key>SBAppUsesLocalNotifications</key>
 	<true/>
 	<key>application-identifier</key>
-	<string>com.chargelimiter.mod</string>
+	<string>com.jy.charge</string>
 	<key>com.apple.Pasteboard.background-access</key>
 	<true/>
 	<key>com.apple.SystemConfiguration.SCPreferences-write-access</key>
@@ -50,7 +50,7 @@
 	<true/>
 	<key>com.apple.private.usernotifications.bundle-identifiers</key>
 	<array>
-		<string>com.chargelimiter.mod</string>
+		<string>com.jy.charge</string>
 	</array>
 	<key>com.apple.runningboard.process-state</key>
 	<true/>

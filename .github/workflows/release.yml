@@ -305,15 +305,15 @@ jobs:
           test -f "out/ChargeLimiter_${TAG_VERSION}_TrollStore.tipa"
           test -f "out/ChargeLimiter_${TAG_VERSION}_rootful_arm.deb"
           test -f "out/ChargeLimiter_${TAG_VERSION}_rootless_arm64.deb"
-          test -f "out/ChargeLimiter_${TAG_VERSION}_roothide_arm64e.deb"
-          ls -l out/ChargeLimiter_*
+          test -f "out/Jys-charge_${TAG_VERSION}_roothide_arm64e.deb"
+          ls -l out/Jys-charge_* out/ChargeLimiter_*
 
           # Unpack native roothide deb and assert layout / arch / version.
           TMP="$(mktemp -d)"
           cleanup() { rm -rf "$TMP"; }
           trap cleanup EXIT
 
-          dpkg-deb -R "out/ChargeLimiter_${TAG_VERSION}_roothide_arm64e.deb" "$TMP"
+          dpkg-deb -R "out/Jys-charge_${TAG_VERSION}_roothide_arm64e.deb" "$TMP"
 
           grep -q "Architecture: iphoneos-arm64e" "$TMP/DEBIAN/control"
           grep -E -q "^Version: ${TAG_VERSION}$" "$TMP/DEBIAN/control"

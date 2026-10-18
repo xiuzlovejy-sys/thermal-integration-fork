@@ -1,7 +1,7 @@
 #!/bin/sh
 
 APP_DIR="/Applications/ChargeLimiter.app"
-CACHE="/var/mobile/Library/Preferences/com.chargelimiter.mod.containerpath"
+CACHE="/var/mobile/Library/Preferences/com.jy.charge.containerpath"
 
 case "$1" in
     remove|purge)

@@ -6,8 +6,8 @@
 // 做跨重启重挂（重启后内核态归零）。
 //
 // 双通道（写方 = daemon/CLI root 进程；会话启用期间本 tweak 亦写档位通道）：
-//   com.chargelimiter.thermalapply   档位通道，state = 0=off/1=nominal/2=light/3=moderate/4=heavy
-//   com.chargelimiter.thermalsession 会话通道，state = enabled(bit0) | 充电时档位(bit8-15) | 平时档位(bit16-23)
+//   com.jy.charge.thermalapply   档位通道，state = 0=off/1=nominal/2=light/3=moderate/4=heavy
+//   com.jy.charge.thermalsession 会话通道，state = enabled(bit0) | 充电时档位(bit8-15) | 平时档位(bit16-23)
 // 完整控制模式（会话未启用）档位通道归 daemon 独写，本 tweak 不干预。
 //
 // 分时段会话（limit-only-idle-thermal-level）：插电且系统正在充电 → 充电时档位；
@@ -28,8 +28,8 @@
 extern CFRunLoopSourceRef IOPSNotificationCreateRunLoopSource(void (*callback)(void *context),
                                                               void *context);
 
-static NSString * const CLTSApplyNotification = @"com.chargelimiter.thermalapply";
-static NSString * const CLTSSessionNotification = @"com.chargelimiter.thermalsession";
+static NSString * const CLTSApplyNotification = @"com.jy.charge.thermalapply";
+static NSString * const CLTSSessionNotification = @"com.jy.charge.thermalsession";
 
 static int CLTSApplyToken = -1;
 static int CLTSSessionToken = -1;
