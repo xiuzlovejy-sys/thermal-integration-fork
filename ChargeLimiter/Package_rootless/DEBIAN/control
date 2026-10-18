@@ -1,0 +1,10 @@
+Package: com.chargelimiter.mod
+Name: Modified ChargeLimiter
+Version: 1.17.5
+Description: 优化了一下界面
+Section: Applications
+Depends: firmware (>= 13.0)
+Priority: optional
+Architecture: iphoneos-arm64
+Author: tune
+Maintainer: tune

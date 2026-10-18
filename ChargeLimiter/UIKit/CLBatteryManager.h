@@ -1,0 +1,226 @@
+//
+//  CLBatteryManager.h
+//  ChargeLimiter
+//
+//  电池数据管理器 - 管理电池状态和配置
+//
+
+#import <Foundation/Foundation.h>
+
+NS_ASSUME_NONNULL_BEGIN
+
+// 充电模式
+typedef NS_ENUM(NSInteger, CLChargeMode) {
+    CLChargeModePlugAndCharge = 1, // 插电即充
+    CLChargeModeEdgeTrigger = 2    // 边缘触发
+};
+
+// 高温模拟等级
+typedef NS_ENUM(NSInteger, CLThermalMode) {
+    CLThermalModeOff = 0,
+    CLThermalModeNominal,
+    CLThermalModeLight,
+    CLThermalModeModerate,
+    CLThermalModeHeavy
+};
+
+// 运行模式（三态主开关，limit-only daemon-free spec B1）
+typedef NS_ENUM(NSInteger, CLOperationMode) {
+    CLOperationModeOff = 0,      // 关闭：master-off，daemon 不驻留
+    CLOperationModeFullControl,  // 完整控制：常驻策略（现状全部功能）
+    CLOperationModeLimitOnly     // 仅限流：daemon 零驻留，tweak 会话限流
+};
+
+// 仅限流会话生效验证状态（fix-thermal-limit-live-loop D4：失败终态）
+typedef NS_ENUM(NSInteger, CLLimitOnlyVerifyState) {
+    CLLimitOnlyVerifyUnknown = 0,   // 未下发/未插电
+    CLLimitOnlyVerifyVerifying,     // 已下发，验证窗口内
+    CLLimitOnlyVerifyApplied,       // 探针达标（生效中）
+    CLLimitOnlyVerifyFailed         // 超窗未达标（可重试）
+};
+
+// 仅限流会话当前生效时段（limit-only-idle-thermal-level：分时段互斥裁决，与 tweak 同判据）
+typedef NS_ENUM(NSInteger, CLLimitOnlyActiveScope) {
+    CLLimitOnlyScopeOff = 0,        // 两侧档位皆关闭：不施加热模拟
+    CLLimitOnlyScopeCharging,       // 插电且系统正在充电：取充电时档位
+    CLLimitOnlyScopeIdle            // 未插电或插线未充电：取平时档位
+};
+
+typedef NS_ENUM(NSInteger, CLHoldModeBehavior) {
+    CLHoldModeBehaviorBalanced = 0,
+    CLHoldModeBehaviorPowerFirst,
+    CLHoldModeBehaviorBatteryFirst,
+    CLHoldModeBehaviorAdaptive
+};
+
+// 数据更新通知
+extern NSNotificationName const CLBatteryInfoDidUpdateNotification;
+extern NSNotificationName const CLConfigDidUpdateNotification;
+extern NSNotificationName const CLDaemonStatusDidChangeNotification;
+
+@interface CLBatteryManager : NSObject
+
++ (instancetype)shared;
+
+#pragma mark - 连接状态
+@property(nonatomic, assign, readonly) BOOL daemonAlive;
+
+#pragma mark - 电池信息 (只读)
+@property(nonatomic, assign, readonly) NSInteger currentCapacity;  // 当前电量 %
+@property(nonatomic, assign, readonly) NSInteger rawCapacity;      // 原始容量 mAh
+@property(nonatomic, assign, readonly) NSInteger nominalCapacity;  // 实际容量 mAh
+@property(nonatomic, assign, readonly) NSInteger designCapacity;   // 设计容量 mAh
+@property(nonatomic, assign, readonly) CGFloat temperature;        // 温度 ℃
+@property(nonatomic, assign, readonly) NSInteger cycleCount;       // 循环次数
+@property(nonatomic, assign, readonly) NSInteger health;           // 健康度 %
+@property(nonatomic, assign, readonly) NSInteger amperage;         // 电流 mA
+@property(nonatomic, assign, readonly) NSInteger instantAmperage;  // 瞬时电流 mA
+@property(nonatomic, assign, readonly) CGFloat voltage;            // 电压 V
+@property(nonatomic, assign, readonly) CGFloat bootVoltage;        // 启动电压 V
+@property(nonatomic, assign, readonly) BOOL isCharging;            // 正在充电
+@property(nonatomic, assign, readonly) BOOL externalConnected;     // 电源已连接
+@property(nonatomic, assign, readonly) BOOL externalChargeCapable; // 电源可充电
+@property(nonatomic, assign, readonly) BOOL batteryInstalled;      // 电池已安装
+@property(nonatomic, copy, readonly, nullable) NSString *serial;   // 序列号
+@property(nonatomic, assign, readonly) NSTimeInterval updateTime;  // 更新时间
+@property(nonatomic, assign, readonly) BOOL predictiveChargingInhibitActive; // 处于系统停充抑制
+@property(nonatomic, assign, readonly) BOOL chargeCommandEnabled;            // daemon 允许继续充电
+@property(nonatomic, assign, readonly) BOOL holdActive;                      // 插电保持模式生效中
+@property(nonatomic, assign, readonly) BOOL holdCharging;                    // 插电保持模式正在补电
+@property(nonatomic, assign, readonly) NSInteger holdTarget;                 // 插电保持目标
+@property(nonatomic, assign, readonly) NSInteger holdRangeLower;             // 插电保持下边界
+@property(nonatomic, copy, readonly, nullable) NSString *policyState;        // daemon 当前策略状态
+@property(nonatomic, copy, readonly, nullable) NSString *policyReason;       // 当前策略原因
+@property(nonatomic, copy, readonly, nullable) NSString *lastPolicyChangeReason; // 最近一次策略切换原因
+@property(nonatomic, assign, readonly) NSTimeInterval lastPolicyChangeTime;  // 最近一次策略切换时间
+@property(nonatomic, assign, readonly) NSTimeInterval lastChargeCommandTime; // 最近一次充电命令时间
+@property(nonatomic, assign, readonly) NSTimeInterval lastInflowCommandTime; // 最近一次禁流/恢复时间
+@property(nonatomic, assign, readonly) NSInteger smartChargeStatus;          // 系统优化充电状态
+@property(nonatomic, assign, readonly) BOOL smartChargeManagedByDaemon;      // 由 daemon 临时停用
+@property(nonatomic, assign, readonly) NSInteger smartChargeOriginalStatus;  // 接管前系统优化充电状态
+@property(nonatomic, copy, readonly, nullable) NSString *smartChargeCoordinationSessionID; // 协调会话 ID
+@property(nonatomic, assign, readonly) NSTimeInterval smartChargeCoordinationStartTime; // 本次协调开始时间
+@property(nonatomic, assign, readonly) NSInteger holdMonitorIntervalSeconds; // hold 轮询间隔
+@property(nonatomic, copy, readonly) NSArray<NSDictionary *> *policyTransitionHistory; // 最近若干次策略切换
+@property(nonatomic, copy, readonly) NSArray<NSDictionary *> *policyEventHistory; // 持久化策略事件时间线
+
+#pragma mark - 适配器信息
+@property(nonatomic, copy, readonly, nullable) NSString *adapterName;
+@property(nonatomic, copy, readonly, nullable) NSString *adapterDescription;
+@property(nonatomic, copy, readonly, nullable) NSString *adapterManufacturer;
+@property(nonatomic, assign, readonly) CGFloat adapterVoltage;   // V
+@property(nonatomic, assign, readonly) NSInteger adapterCurrent; // mA
+@property(nonatomic, assign, readonly) NSInteger adapterWatts;   // W
+@property(nonatomic, assign, readonly) BOOL isWirelessCharging;
+
+#pragma mark - 配置项
+@property(nonatomic, assign) BOOL enabled;              // 全局启用
+@property(nonatomic, assign) CLChargeMode chargeMode;   // 充电模式
+@property(nonatomic, assign) NSInteger updateFrequency; // 更新频率 (秒)
+@property(nonatomic, assign) BOOL notificationEnabled;  // 通知总开关
+@property(nonatomic, assign) NSInteger chargeBelow;     // 电量下限 %
+@property(nonatomic, assign) NSInteger chargeAbove;     // 电量上限 %
+@property(nonatomic, assign) BOOL tempControlEnabled;   // 温控开关
+@property(nonatomic, assign) NSInteger chargeTempBelow; // 温度下限 ℃
+@property(nonatomic, assign) NSInteger chargeTempAbove; // 温度上限 ℃
+@property(nonatomic, assign) BOOL historyStatsEnabled;  // 历史统计采集开关
+@property(nonatomic, assign) BOOL accChargeEnabled;     // 加速充电
+@property(nonatomic, assign) BOOL accChargeAirMode;
+@property(nonatomic, assign) BOOL accChargeWifi;
+@property(nonatomic, assign) BOOL accChargeBluetooth;
+@property(nonatomic, assign) BOOL accChargeBrightness;
+@property(nonatomic, assign) BOOL accChargeLPM;
+
+#pragma mark - 高级选项
+@property(nonatomic, assign) BOOL predictiveInhibitCharge; // 智能停充
+@property(nonatomic, assign) BOOL systemCapacityControlAt100Enabled; // 100% 时交由系统控制
+@property(nonatomic, assign) BOOL disableSmartCharge;      // 永久停用系统优化充电
+@property(nonatomic, assign) BOOL disableInflow;           // 禁流
+@property(nonatomic, assign) BOOL holdModeEnabled;         // 插电保持
+@property(nonatomic, assign) NSInteger holdModeBand;       // 插电保持带宽
+@property(nonatomic, assign) NSInteger holdCheckIntervalMinutes; // 插电保持检查间隔（分钟）
+@property(nonatomic, assign) BOOL holdTempDisableSmartCharge; // 插电保持时临时停用系统优化充电
+@property(nonatomic, assign) BOOL limitInflow;             // 充电时档位是否非关闭
+@property(nonatomic, assign) CLThermalMode thermalMode;    // 平时档位
+@property(nonatomic, assign) CLThermalMode limitInflowThermalMode; // 充电时档位
+@property(nonatomic, copy, readonly, nullable) NSString *thermalActiveScope; // daemon 裁决的当前生效范围 charging/idle/off
+@property(nonatomic, assign, readonly) BOOL thermalMergeNoticePending; // 检测到合并前的旧配置，App 应弹一次合并说明
+@property(nonatomic, assign) CLThermalMode thermalSimulateMode; // 实际系统温度等级
+@property(nonatomic, copy) NSString *thermalConfigMode;   // 已配置的模拟档位（com.apple.cltm）
+@property(nonatomic, copy) NSString *thermalApplyStatus;  // 最近一次应用结果 applied/unverified/unknown
+@property(nonatomic, assign) BOOL fullChargeScheduleEnabled;    // 满充计划
+@property(nonatomic, assign) NSInteger fullChargeScheduleIntervalDays;
+@property(nonatomic, assign) NSInteger fullChargeScheduleStartMinute;
+@property(nonatomic, assign) NSInteger fullChargeScheduleDurationHours;
+
+#pragma mark - 仅限流模式（daemon-free）
+@property(nonatomic, assign, readonly) CLOperationMode operationMode; // 由 enable/limit_only_mode 派生
+@property(nonatomic, copy) NSString *limitOnlyLevel;             // 仅限流·充电时档位 off/nominal/light/moderate/heavy
+@property(nonatomic, copy) NSString *limitOnlyIdleLevel;         // 仅限流·平时档位（缺键按 off）
+@property(nonatomic, assign, readonly) CLLimitOnlyActiveScope limitOnlyActiveScope; // 当前生效时段（分时段互斥裁决）
+@property(nonatomic, assign, readonly) BOOL limitOnlySessionEnabled; // daemon 报告的 root 域会话键
+@property(nonatomic, assign, readonly) BOOL directPlugConnected;     // 直读插电状态（零 daemon 依赖）
+@property(nonatomic, assign, readonly) BOOL directReadAvailable;     // 直读是否成功（失败回退 daemon API）
+@property(nonatomic, assign, readonly) BOOL limitOnlyApplied;        // thermalState 探针判定已生效
+@property(nonatomic, assign, readonly) CLLimitOnlyVerifyState limitOnlyVerifyState; // 生效验证三态（D4）
+@property(nonatomic, copy, readonly, nullable) NSString *limitOnlyReestablishStatus; // D5 启动重建结果（ok / spawn_failed_N，nil=未触发）
+
+#pragma mark - 诚实诊断面（fix-thermal-limit-live-loop D3）
+@property(nonatomic, assign, readonly) BOOL sessionChannelEnabled;          // 会话通道内核态 enabled 位
+@property(nonatomic, copy, readonly, nullable) NSString *sessionChannelMode; // 会话通道·充电时档位（内核态解码；nil=读取失败）
+@property(nonatomic, copy, readonly, nullable) NSString *sessionChannelIdleMode; // 会话通道·平时档位（内核态解码；nil=读取失败）
+@property(nonatomic, copy, readonly, nullable) NSString *externalSimulationSource; // 外部模拟源在场（powercuff）
+@property(nonatomic, copy, readonly) NSString *thermalApplySource;          // 应用结果来源：app-probe / daemon-probe
+@property(nonatomic, assign, readonly) NSTimeInterval thermalApplyCheckedAt; // 应用结果最近判定时间（App 探针口径）
+
+// 直读会话状态：AppleSmartBattery 插电判定 + thermalState 生效验证（零 daemon 依赖）
+- (void)refreshDirectSessionState;
+
+// 仅限流两个分时段档位写入：一次性 root 进程（daemon CLI 动词 apply_limit_only）+ 本进程探针验证。
+// chargeMode = 插电充电时档位；idleMode = 未插电/插线未充电时档位。off 是合法值（该时段不施加）。
+- (void)applyLimitOnlyLevelsWithChargeMode:(NSString *)chargeMode
+                                  idleMode:(NSString *)idleMode
+                                completion:(nullable void (^)(BOOL success))completion;
+// 当前生效时段对应的档位名（off/nominal/light/moderate/heavy）；两侧皆关时返回 off
+- (NSString *)limitOnlyActiveLevel;
+// 当前是否处于「插电且正在充电」时段——分时段裁决的唯一判据实现。
+// scope 计算与 UI 的关闭分支共用它，避免两侧判据分叉（第 4 轮验收 A8 的根因）。
+- (BOOL)limitOnlyChargingPeriodApplies;
+
+// 三态主开关编排（spec B1：先改 daemon 状态，后写 tweak 会话，保证还原不清会话）
+- (void)switchToMode:(CLOperationMode)mode completion:(nullable void (^)(BOOL success))completion;
+
+#pragma mark - 系统信息
+@property(nonatomic, copy, readonly, nullable) NSString *systemVersion;
+@property(nonatomic, copy, readonly, nullable) NSString *deviceModel;
+@property(nonatomic, copy, readonly, nullable) NSString *appVersion;
+@property(nonatomic, assign, readonly) NSTimeInterval systemBootTime;
+@property(nonatomic, assign, readonly) NSTimeInterval serviceBootTime;
+
+#pragma mark - 方法
+
+// 刷新数据
+- (void)refreshBatteryInfo;
+- (void)refreshConfig;
+- (void)refreshAll;
+
+// 开始/停止自动更新
+- (void)startAutoRefresh;
+- (void)stopAutoRefresh;
+
+// 控制充电
+- (void)setCharging:(BOOL)charging completion:(nullable void (^)(BOOL success))completion;
+- (void)setInflow:(BOOL)inflow completion:(nullable void (^)(BOOL success))completion;
+
+// 重置配置
+- (void)resetConfigWithCompletion:(nullable void (^)(BOOL success))completion;
+
+// 清空历史统计
+- (void)clearStatisticsWithCompletion:(nullable void (^)(BOOL success))completion;
+
+// 保存单个配置项
+- (void)saveConfigKey:(NSString *)key value:(id)value completion:(nullable void (^)(BOOL success))completion;
+
+@end
+
+NS_ASSUME_NONNULL_END

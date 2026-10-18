@@ -1,0 +1,141 @@
+name: build-roothide-deb
+
+# 构建原生 RootHide arm64e deb（仅编译/打包/静态验收，不安装、不触达设备）。
+# 安装与真机实验需用户另行明确授权（见 computer-handoff-2026-10-18.md 第五节）。
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # 第一步：工具链探测。交接文档标记的关键阻塞是 arm64e 新 ABI
+  # （Mach-O cpusubtype caps 0x80，设备上 Procursus clang 14 只能出 0x00）。
+  # 先用一个不含设备 API 的 .o 验证 Xcode/Apple Clang 产出 0x80000002。
+  toolchain-probe:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Probe arm64e ABI (Mach-O subtype/caps)
+        run: |
+          set -euo pipefail
+          mkdir -p probe && cd probe
+          printf 'int probe_symbol(void){return 1;}\n' > probe.c
+          xcrun -sdk iphoneos clang -arch arm64e -c probe.c -o probe-arm64e.o
+          xcrun -sdk iphoneos clang -arch arm64  -c probe.c -o probe-arm64.o
+          python3 - <<'PY'
+          import struct, sys
+
+          def macho(path):
+              with open(path, 'rb') as f:
+                  data = f.read(16)
+              assert data[:4] == b'\xcf\xfa\xed\xfe', f'{path}: not a 64-bit Mach-O'
+              _, cputype, cpusub = struct.unpack('<III', data[4:16])
+              return cputype, cpusub
+
+          ct, cs = macho('probe-arm64e.o')
+          caps = (cs >> 24) & 0xFF
+          sub = cs & 0xFFFFFF
+          print(f'arm64e object: cputype={hex(ct)} subtype={hex(sub)} caps={hex(caps)}')
+          assert ct == 0x0100000C, 'cputype must be CPU_TYPE_ARM64'
+          assert sub == 2, 'subtype must be CPU_SUBTYPE_ARM64E (2)'
+          assert caps == 0x80, f'ABI FAIL: caps must be 0x80 (new arm64e ABI), got {hex(caps)}'
+          print('ABI PROBE OK: new arm64e ABI (cpusubtype 0x80000002) confirmed')
+          PY
+
+      - name: Record toolchain versions
+        run: |
+          {
+            echo "### Toolchain provenance"
+            echo '```'
+            xcodebuild -version
+            xcrun --show-sdk-version --sdk iphoneos || true
+            xcrun clang --version | head -3
+            xcrun ld -version 2>/dev/null | head -1 || true
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+  build:
+    needs: toolchain-probe
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install packaging tools (dpkg, ldid, ripgrep)
+        run: |
+          brew install dpkg ldid ripgrep
+
+      - name: Install Theos (roothide fork) to /opt/theos
+        run: |
+          set -euo pipefail
+          # roothide/theos 递归克隆: vendor/include=roothide/headers(私有头),
+          # vendor/lib=roothide/lib(libroot.a fat 包, arm64e 切片 caps 0x80)
+          sudo mkdir -p /opt
+          sudo git clone --depth 1 --recursive https://github.com/roothide/theos /opt/theos
+          # libroothide devkit: module.modulemap / stub.h 并入 roothide 头目录
+          curl -fsSL -o /tmp/devkit.zip https://github.com/RootHide/libroothide/files/12643716/devkit.zip
+          unzip -o /tmp/devkit.zip -d /tmp/devkit
+          sudo cp -a /tmp/devkit/devkit/roothide/. /opt/theos/vendor/include/roothide/
+          sudo cp /tmp/devkit/devkit/roothide.h /opt/theos/vendor/include/ || true
+          sudo mkdir -p /opt/include
+          sudo ln -sfn /opt/theos/vendor/include /opt/include
+
+      - name: Verify build prerequisites
+        run: |
+          set -euo pipefail
+          test -f /opt/theos/vendor/include/IOKit/hid/IOHIDService.h
+          test -f /opt/theos/vendor/include/MobileCoreServices/LSApplicationProxy.h
+          test -f /opt/theos/vendor/lib/libroot.a
+          test -f /opt/theos/vendor/lib/libroothide.tbd
+          echo "theos headers + libroot + libroothide.tbd OK"
+
+      - name: Build roothide deb only (native scheme, arm64e)
+        run: |
+          set -euo pipefail
+          # --roothide-only: 只构建 ChargeLimiter roothide scheme + Package_roothide,
+          # 不触发 rootful/rootless/TIPA 构建（交接文档第五节要求）。
+          ./scripts/build_packages.sh --roothide-only
+
+      - name: Verify deb contents: arm64e ABI caps 0x80 on every Mach-O
+        run: |
+          set -euo pipefail
+          DEB=$(ls out/ChargeLimiter_*_roothide_arm64e.deb)
+          echo "checking $DEB"
+          rm -rf /tmp/debcheck && mkdir -p /tmp/debcheck
+          dpkg-deb -x "$DEB" /tmp/debcheck
+          dpkg-deb -f "$DEB" Package Version Architecture
+          python3 - "$DEB" <<'PY'
+          import os, struct, sys
+
+          root = '/tmp/debcheck'
+          targets = []
+          for dirpath, _, files in os.walk(root):
+              for name in files:
+                  p = os.path.join(dirpath, name)
+                  with open(p, 'rb') as f:
+                      if f.read(4) == b'\xcf\xfa\xed\xfe':
+                          targets.append(p)
+          assert targets, 'no Mach-O binaries found in deb'
+          bad = 0
+          for p in sorted(targets):
+              with open(p, 'rb') as f:
+                  _, cputype, cpusub = struct.unpack('<III', f.read(16)[4:16])
+              caps = (cpusub >> 24) & 0xFF
+              sub = cpusub & 0xFFFFFF
+              ok = cputype == 0x0100000C and sub == 2 and caps == 0x80
+              bad += 0 if ok else 1
+              print(f'{"OK " if ok else "BAD"}: {os.path.relpath(p, root)} '
+                    f'subtype={hex(sub)} caps={hex(caps)}')
+          sys.exit(1 if bad else 0)
+          PY
+
+      - name: Upload roothide deb artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: chargelimiter-roothide-arm64e-deb
+          path: out/*.deb
+          if-no-files-found: error

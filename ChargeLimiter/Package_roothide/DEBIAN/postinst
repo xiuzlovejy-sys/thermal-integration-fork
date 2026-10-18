@@ -1,0 +1,165 @@
+#!/bin/sh
+
+APP_DIR="/Applications/ChargeLimiter.app"
+DAEMON_PLIST="/Library/LaunchDaemons/com.chargelimiter.mod.plist"
+CACHE="/var/mobile/Library/Preferences/com.chargelimiter.mod.containerpath"
+
+# 修复共享配置数据目录权限：daemon 以 root 运行时会以 root:wheel 创建文件，
+# 导致 mobile App 无法以原子替换方式写入 com.chargelimiter.mod.plist。
+# 原生 roothide 安装时 maintainer 脚本已在 jbroot 命名空间内，
+# /var/mobile/ChargeLimiter 按 jbroot 逻辑路径书写即可（不要写成 /rootfs/...）。
+DATA_DIR="/var/mobile/ChargeLimiter"
+
+fail_install() {
+    echo "ChargeLimiter postinst: $*" >&2
+    exit 1
+}
+
+repair_shared_data_permissions() {
+    if [ -d "$DATA_DIR" ]; then
+        chown mobile:mobile "$DATA_DIR"
+        chmod 0750 "$DATA_DIR"
+    fi
+    for conf_path in "$DATA_DIR"/com.chargelimiter.mod.plist; do
+        if [ -e "$conf_path" ]; then
+            chown mobile:mobile "$conf_path"
+            chmod 0640 "$conf_path"
+        fi
+    done
+}
+
+chown -R root:wheel "$APP_DIR"
+chmod +s "$APP_DIR/ChargeLimiterDaemon"
+killall -9 ChargeLimiter ChargeLimiterDaemon 2>/dev/null
+rm -f "$CACHE"
+
+# 在 daemon bootstrap 前修复共享数据目录权限，避免 daemon 重新夺走所有权。
+repair_shared_data_permissions
+
+chown root:wheel "$DAEMON_PLIST"
+
+# relaxin: system 域 launchd 在 rootfs 命名空间，看不到 jbroot 内的逻辑路径。
+# 用 jbroot 命令把 Program 解析成 /rootfs/.jbroot-XXX/... 真实路径，
+# 否则 bootstrap 成功但 daemon 永不 exec。
+DAEMON_BIN="$APP_DIR/ChargeLimiterDaemon"
+REAL_DAEMON=""
+command -v jbroot >/dev/null 2>&1 || fail_install "jbroot command is unavailable"
+REAL_DAEMON="$(jbroot "$DAEMON_BIN" 2>/dev/null)" || \
+    fail_install "jbroot failed to resolve $DAEMON_BIN"
+
+case "$REAL_DAEMON" in
+    */.jbroot-*/Applications/ChargeLimiter.app/ChargeLimiterDaemon) ;;
+    *) fail_install "invalid daemon path resolved by jbroot: ${REAL_DAEMON:-<empty>}" ;;
+esac
+[ -x "$REAL_DAEMON" ] || fail_install "resolved daemon is not executable: $REAL_DAEMON"
+
+# plist 编辑：Irisin 等安装器以 DISABLE_TWEAKS=1 运行 maintainer 脚本
+# （root 进程禁止注入），其子进程无 roothide 路径重映射，且 iOS 系统
+# 本身不附带 plutil（Sileo 环境带注入才看得到）。因此改写 plist 分两级：
+# 优先 plutil（存在时），否则退回 bootstrap 必备的 sed 对 XML plist 做
+# 等价文本替换——包内 plist 的 Program 与 ProgramArguments.0 是同一
+# 字面路径，全局替换一次即同时覆盖两处。真实 rootfs 前缀从 jbroot 已
+# 解析出的 REAL_DAEMON 推导，不硬编码 /var/jb 或 .jbroot-*。
+ROOTFS_PREFIX="${REAL_DAEMON%%/.jbroot-*}"
+
+# daemon plist 真实路径：system 域 launchd 在真实 rootfs 上，看不到
+# jbroot 逻辑路径；launchctl/launchd 一律用该真实路径。
+REAL_PLIST="$(jbroot "$DAEMON_PLIST" 2>/dev/null)" || \
+    fail_install "jbroot failed to resolve $DAEMON_PLIST"
+[ -f "$REAL_PLIST" ] || fail_install "daemon plist not found: ${REAL_PLIST:-<empty>}"
+
+edit_daemon_plist_with_plutil() {
+    PLUTIL_BIN="$(command -v plutil 2>/dev/null || true)"
+    if [ -z "$PLUTIL_BIN" ]; then
+        for cand in \
+            "$(jbroot /usr/bin/plutil 2>/dev/null)" \
+            "$ROOTFS_PREFIX/usr/bin/plutil"; do
+            if [ -n "$cand" ] && [ -x "$cand" ]; then
+                PLUTIL_BIN="$cand"
+                break
+            fi
+        done
+    fi
+    [ -n "$PLUTIL_BIN" ] && [ -x "$PLUTIL_BIN" ] || return 1
+    "$PLUTIL_BIN" -replace Program -string "$REAL_DAEMON" "$REAL_PLIST" || return 1
+    "$PLUTIL_BIN" -replace ProgramArguments.0 -string "$REAL_DAEMON" "$REAL_PLIST" || return 1
+}
+
+edit_daemon_plist_with_sed() {
+    SED_BIN="$(command -v sed 2>/dev/null || true)"
+    if [ -z "$SED_BIN" ]; then
+        for cand in \
+            "$(jbroot /usr/bin/sed 2>/dev/null)" \
+            "$ROOTFS_PREFIX/usr/bin/sed"; do
+            if [ -n "$cand" ] && [ -x "$cand" ]; then
+                SED_BIN="$cand"
+                break
+            fi
+        done
+    fi
+    [ -n "$SED_BIN" ] && [ -x "$SED_BIN" ] || \
+        fail_install "no plist editor available (plutil and sed both missing)"
+    sed "s|/Applications/ChargeLimiter.app/ChargeLimiterDaemon|$REAL_DAEMON|g" \
+        "$REAL_PLIST" > "$REAL_PLIST.tmp" \
+        || fail_install "sed rewrite of daemon plist failed (sed=$SED_BIN)"
+    mv "$REAL_PLIST.tmp" "$REAL_PLIST" \
+        || fail_install "failed to move rewritten daemon plist into place"
+    grep -q -F "$REAL_DAEMON" "$REAL_PLIST" \
+        || fail_install "daemon plist rewrite verification failed ($REAL_PLIST)"
+}
+
+if ! edit_daemon_plist_with_plutil; then
+    edit_daemon_plist_with_sed
+fi
+
+# launchctl 二进制按三来源解析（iOS 自带 /usr/bin/launchctl；Irisin 的
+# PATH 含 /rootfs/usr/bin 可达；Sileo 注入环境下 PATH 直接可达）。
+LAUNCHCTL_BIN="$(command -v launchctl 2>/dev/null || true)"
+if [ -z "$LAUNCHCTL_BIN" ]; then
+    for cand in \
+        "$(jbroot /usr/bin/launchctl 2>/dev/null)" \
+        "$ROOTFS_PREFIX/usr/bin/launchctl" \
+        "$ROOTFS_PREFIX/bin/launchctl"; do
+        if [ -n "$cand" ] && [ -x "$cand" ]; then
+            LAUNCHCTL_BIN="$cand"
+            break
+        fi
+    done
+fi
+[ -n "$LAUNCHCTL_BIN" ] && [ -x "$LAUNCHCTL_BIN" ] || \
+    fail_install "launchctl not found (tried PATH, jbroot /usr/bin/launchctl, $ROOTFS_PREFIX/usr/bin/launchctl)"
+
+# 清理新旧域的可能残留；bootstrap/load 一律用真实路径——真实 launchd
+# 看不到 jbroot 逻辑路径。label 形式兜底卸载旧版本按旧路径注册的残留。
+"$LAUNCHCTL_BIN" bootout system/com.chargelimiter.mod 2>/dev/null
+"$LAUNCHCTL_BIN" bootout system "$REAL_PLIST" 2>/dev/null
+"$LAUNCHCTL_BIN" bootout user/foreground "$REAL_PLIST" 2>/dev/null
+if ! "$LAUNCHCTL_BIN" bootstrap system "$REAL_PLIST" 2>/dev/null; then
+    "$LAUNCHCTL_BIN" load "$REAL_PLIST" 2>/dev/null || \
+        fail_install "launchctl failed to load daemon plist (launchctl=$LAUNCHCTL_BIN plist=$REAL_PLIST)"
+fi
+
+# CLThermalSim 只在 thermalmonitord 启动时注入（Powercuff 同款重载）：升级后必须
+# 重启 thermalmonitord 才能换掉内存中的旧版 tweak。killall 与 plutil/launchctl
+# 同理不能假定在 PATH（DISABLE_TWEAKS 安装器无注入无 /usr/bin），按 PATH →
+# jbroot → 真实 rootfs 推导；找不到仅放弃重载，不阻塞安装。
+reload_thermalmonitord() {
+    KILLALL_BIN="$(command -v killall 2>/dev/null || true)"
+    if [ -z "$KILLALL_BIN" ]; then
+        for cand in \
+            "$(jbroot /usr/bin/killall 2>/dev/null)" \
+            "$ROOTFS_PREFIX/usr/bin/killall"; do
+            if [ -n "$cand" ] && [ -x "$cand" ]; then
+                KILLALL_BIN="$cand"
+                break
+            fi
+        done
+    fi
+    [ -n "$KILLALL_BIN" ] && [ -x "$KILLALL_BIN" ] || return 0
+    "$KILLALL_BIN" thermalmonitord 2>/dev/null || true
+}
+reload_thermalmonitord
+
+uicache -p "$APP_DIR" 2>/dev/null
+
+exit 0

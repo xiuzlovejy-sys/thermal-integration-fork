@@ -1,0 +1,82 @@
+#!/bin/sh
+
+APP_DIR="/Applications/ChargeLimiter.app"
+DAEMON_PLIST="/Library/LaunchDaemons/com.chargelimiter.mod.plist"
+CACHE="/var/mobile/Library/Preferences/com.chargelimiter.mod.containerpath"
+
+should_cleanup_data() {
+    action="$1"
+    reason="${2:-}"
+    case "$action" in
+        purge)
+            return 0
+            ;;
+        remove)
+            [ -z "$reason" ] && return 0
+            return 1
+            ;;
+    esac
+    return 1
+}
+
+warn_manual_cleanup() {
+    printf '[ChargeLimiter] Failed to remove shared data automatically (%s). Please remove it manually from your file manager.\n' "$1" >&2
+}
+
+warn_restore_failed() {
+    printf '[ChargeLimiter] Warning: failed to restore system charge state during removal. If Optimized Battery Charging stays off, toggle it in Settings, or reinstall ChargeLimiter and use "Restore Optimized Battery Charging".\n' >&2
+}
+
+resolve_roothide_data_dir() {
+    logical_path="/var/mobile/ChargeLimiter"
+    for jbroot_cmd in /usr/bin/jbroot /bin/jbroot jbroot; do
+        command -v "$jbroot_cmd" >/dev/null 2>&1 || continue
+        rooted_path="$("$jbroot_cmd" "$logical_path" 2>/dev/null)" || continue
+        rooted_path="${rooted_path%/}"
+        jbroot_prefix="${rooted_path%/var/mobile/ChargeLimiter}"
+        [ "$jbroot_prefix" != "$rooted_path" ] || continue
+        case "${jbroot_prefix##*/}" in
+            .jbroot-?*)
+                printf '%s\n' "$rooted_path"
+                return 0
+                ;;
+        esac
+    done
+    return 1
+}
+
+cleanup_shared_data() {
+    "$APP_DIR/ChargeLimiterDaemon" cleanup_data_container 2>/dev/null && return 0
+    daemon_rc=$?
+
+    if ! rooted_data_dir="$(resolve_roothide_data_dir)"; then
+        warn_manual_cleanup "stage=resolve_roothide_data daemon_rc=$daemon_rc"
+        return 1
+    fi
+
+    rm -rf "$rooted_data_dir"
+    rm_rc=$?
+    if [ "$rm_rc" -eq 0 ] && [ ! -e "$rooted_data_dir" ]; then
+        return 0
+    fi
+
+    warn_manual_cleanup "stage=remove_roothide_data daemon_rc=$daemon_rc rm_rc=$rm_rc"
+    return 1
+}
+
+# limit-only 会话键先行清理（spec B7）：卸载必须清除 clLimitSessionEnabled/clLimitMode
+# 并把 thermal 镜像归官方，否则残留键会在重装 tweak 后经 initProduct 复活会话。
+"$APP_DIR/ChargeLimiterDaemon" apply_limit_only 0 >/dev/null 2>&1 || true
+if ! "$APP_DIR/ChargeLimiterDaemon" reset_and_exit >/dev/null 2>&1; then
+    warn_restore_failed
+fi
+launchctl bootout system "$DAEMON_PLIST" 2>/dev/null
+launchctl bootout user/foreground "$DAEMON_PLIST" 2>/dev/null || launchctl unload "$DAEMON_PLIST" 2>/dev/null
+killall -9 ChargeLimiter ChargeLimiterDaemon 2>/dev/null
+if should_cleanup_data "$1" "${2:-}"; then
+    cleanup_shared_data
+fi
+rm -f "$CACHE"
+uicache -p "$APP_DIR" 2>/dev/null
+
+exit 0

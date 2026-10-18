@@ -1,0 +1,72 @@
+# IDE & Editor
+.vscode
+*.xcuserstate
+xcuserdata/
+
+# Build outputs
+build/
+build_roothide/
+build_rootless/
+build_rootful/
+Payload/
+Packages/
+LatestBuild/
+DerivedData/
+ChargeLimiter/Package/Applications
+ChargeLimiter/Package_rootless/Applications
+ChargeLimiter/Package_rootless_arm64
+ChargeLimiter_rootless/Package/Applications
+ChargeLimiter_rootless/Package_tmp
+ChargeLimiter_roothide
+.theos
+out/
+ex/
+
+# Local jailbreak link stubs (filled by Theos vendor / build_packages ensure step; do not commit)
+ChargeLimiter/libroot.a
+ChargeLimiter/libroothide.tbd
+.tmp/
+
+# macOS
+.DS_Store
+__MACOSX/
+._*
+*.swp
+
+# Backup files
+*.bak
+*.orig
+*.backup
+
+# Temporary files
+*.tmp
+*.temp
+__pycache__/
+*.pyc
+
+# Draft documents
+Readme2.md
+SWIFTUI_CHANGES_LOG.txt
+REFACTOR_SUMMARY.md
+/docs
+LatestBuild
+后续工作计划.md
+outputs
+.serena
+AGENTS.md
+.vibeskills
+scripts/tests
+.claude/worktrees/
+.worktrees/
+
+# 内部文档不入库（历史已重写移除）
+/docs/superpowers/
+/docs/openspec/
+/BUGFIX_SUMMARY.md
+ChargeLimiter/UIKit/CLTheme.h
+ChargeLimiter/UIKit/CLTheme.m
+# >>> Comet managed project state >>>
+!/.comet/
+/.comet/*
+!/.comet/config.yaml
+# <<< Comet managed project state <<<

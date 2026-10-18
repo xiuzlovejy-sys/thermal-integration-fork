@@ -1,0 +1,64 @@
+name: offline-tests
+
+# 离线测试与完整性守卫（无 macOS 分钟消耗，不需 Xcode）:
+#   - C99 策略核心差分测试
+#   - 离线契约测试（干跑边界）
+#   - 分叉完整性审计（上游 152 文件逐字节未变 + 无 daemon/pbxproj 注册）
+#   - 脚本/打包模板测试（含 postinst/prerm 安装脚本审计, 需 /bin/sh）
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  offline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ripgrep
+
+      - name: C99 core tests (temperature stop + SOC + triple advisory)
+        run: |
+          set -euo pipefail
+          A=ChargeLimiter/OfflineAdvisory
+          cc -std=c99 -O2 -Wall -Wextra -Werror -pedantic \
+            "$A/thermal_policy.c" "$A/native_capacity.c" \
+            tests/offline_advisory/test_cores.c -lm -o /tmp/cores
+          /tmp/cores
+          cc -std=c99 -O2 -Wall -Wextra -Werror -pedantic \
+            "$A/thermal_policy.c" "$A/native_capacity.c" \
+            "$A/temperature_stop.c" "$A/triple_advisory.c" \
+            tests/offline_advisory/test_triple.c -lm -o /tmp/triple
+          /tmp/triple
+
+      - name: Offline contract tests
+        run: |
+          python3 tests/offline_advisory/test_contract.py
+          python3 tests/offline_advisory/test_triple_contract.py
+
+      - name: Fork integrity audit vs fixed upstream
+        run: |
+          set -euo pipefail
+          # 上游固定提交（与交接文档一致）
+          git clone --filter=blob:none https://github.com/tunecc/ChargeLimiter /tmp/upstream
+          git -C /tmp/upstream checkout 38bea6cba92a02b2af6b6d3fa6ed807d67342a1f
+          THERMAL_REVIEW_BASE=/tmp/upstream \
+            python3 tests/offline_advisory/audit_fork.py
+
+      - name: Script and package template tests
+        run: |
+          cd scripts/tests
+          python3 -m unittest -q

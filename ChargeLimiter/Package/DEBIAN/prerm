@@ -1,0 +1,44 @@
+#!/bin/sh
+
+APP_DIR="/Applications/ChargeLimiter.app"
+DAEMON_PLIST="/Library/LaunchDaemons/com.chargelimiter.mod.plist"
+CACHE="/var/mobile/Library/Preferences/com.chargelimiter.mod.containerpath"
+
+should_cleanup_data() {
+    action="$1"
+    reason="${2:-}"
+    case "$action" in
+        purge)
+            return 0
+            ;;
+        remove)
+            [ -z "$reason" ] && return 0
+            return 1
+            ;;
+    esac
+    return 1
+}
+
+warn_manual_cleanup() {
+    printf '\033[31m[ChargeLimiter] Failed to remove app data container automatically. Please remove it manually from your file manager.\033[0m\n' >&2
+}
+
+warn_restore_failed() {
+    printf '\033[33m[ChargeLimiter] Warning: failed to restore system charge state during removal. If Optimized Battery Charging stays off, toggle it in Settings, or reinstall ChargeLimiter and use "Restore Optimized Battery Charging".\033[0m\n' >&2
+}
+
+# limit-only 会话键先行清理（spec B7）：卸载必须清除 clLimitSessionEnabled/clLimitMode
+# 并把 thermal 镜像归官方，否则残留键会在重装 tweak 后经 initProduct 复活会话。
+"$APP_DIR/ChargeLimiterDaemon" apply_limit_only 0 >/dev/null 2>&1 || true
+if ! "$APP_DIR/ChargeLimiterDaemon" reset_and_exit >/dev/null 2>&1; then
+    warn_restore_failed
+fi
+launchctl bootout system "$DAEMON_PLIST" 2>/dev/null || launchctl unload "$DAEMON_PLIST" 2>/dev/null
+killall -9 ChargeLimiter ChargeLimiterDaemon 2>/dev/null
+if should_cleanup_data "$1" "${2:-}"; then
+    "$APP_DIR/ChargeLimiterDaemon" cleanup_data_container 2>/dev/null || warn_manual_cleanup
+fi
+rm -f "$CACHE"
+uicache -p "$APP_DIR" 2>/dev/null
+
+exit 0

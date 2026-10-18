@@ -1,0 +1,15 @@
+# Standalone triple advisory (C99)
+
+`triple_advisory.h/.c` combines three existing offline cores; it is **not wired** to daemon, UIKit, or the Xcode project. No device access, I/O, actuator, verified physical charging state, or charging control is provided. Hints and raw subdecisions are review-only synthetic policy output; even `TA_*_RESUME_REVIEW` does not permit charging. An external safety assertion is caller-provided and cannot be verified by this library; ownership is likewise an explicit assertion, never inferred from a charging device. Do not attach hints to hardware without a separate safety design/review.
+
+Initialize with `ta_init(&state, NULL)` for defaults: gradual, exact-temperature stop, and capacity ceiling all disabled. Enable/configure desired policies and call `ta_init(&state, &config)` after **every** settings change; successful initialization resets all history/latches. Direct config mutations are rejected on step. Failed initialization preserves existing state. Each `ta_step` takes explicit monotonic `now`, independent timestamped thermal and SOC samples, ownership, plug/paused/system-critical inputs, and `external_safety_verified` (default false). Pass disjoint state and output pointers. No global state. A single highest-priority review hint is returned: system-critical > fresh emergency > latched exact-temperature stop > latched capacity ceiling > gradual thermal > guarded review of release. Unknown/nonexclusive ownership never emits a hint; unplugged/paused and bad clock never emit resume. Invalid, missing, stale, future or repeated thermal samples never generate resume hints, including capacity resume. All three final resume/release hints (exact, capacity and gradual) additionally require `external_safety_verified == 1` and a fresh safe thermal sample with no higher-priority blocker; absent the flag, diagnostics may record a raw subdecision but the arbitrated resume/release hint remains `TA_NONE` (or a higher-priority hold/stop review). The caller alone is responsible for genuinely establishing external verification; setting the flag without independent evidence is unsafe. Raw embedded core decisions are diagnostics, **not permissions**; in particular, a capacity latch can persist through unknown thermal conditions and mask lower-priority hints. No claim of physical control, charging status, or ownership verification is made.
+
+From repository root, compile and run native tests in `/tmp`:
+
+```sh
+cc -std=c99 -Wall -Wextra -Werror -pedantic -o /tmp/test_triple_advisory tests/offline_advisory/test_triple.c ChargeLimiter/OfflineAdvisory/triple_advisory.c ChargeLimiter/OfflineAdvisory/thermal_policy.c ChargeLimiter/OfflineAdvisory/native_capacity.c ChargeLimiter/OfflineAdvisory/temperature_stop.c -lm
+/tmp/test_triple_advisory
+python3 -m unittest discover -s tests/offline_advisory -p 'test*contract.py' -v
+```
+
+This mock cannot attest freshness or safety of the caller's sensors, physical stop/resume, or exclusive hardware ownership; it provides neither scheduling nor safety-certified actuation.

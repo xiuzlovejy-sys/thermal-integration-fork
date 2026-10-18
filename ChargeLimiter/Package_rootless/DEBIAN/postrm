@@ -1,0 +1,51 @@
+#!/bin/sh
+
+APP_DIR="/var/jb/Applications/ChargeLimiter.app"
+CACHE1="/var/jb/var/mobile/Library/Preferences/com.chargelimiter.mod.containerpath"
+CACHE2="/var/mobile/Library/Preferences/com.chargelimiter.mod.containerpath"
+
+resolve_jbroot() {
+    # roothide preferred: use jbroot tool if available.
+    for cmd in /usr/bin/jbroot /var/jb/usr/bin/jbroot jbroot; do
+        if command -v "$cmd" >/dev/null 2>&1; then
+            rooted="$($cmd /var/mobile/Library/Preferences 2>/dev/null)"
+            if [ -n "$rooted" ] && [ "${rooted#/}" != "$rooted" ]; then
+                printf '%s' "$rooted"
+                return 0
+            fi
+        elif [ -x "$cmd" ]; then
+            rooted="$($cmd /var/mobile/Library/Preferences 2>/dev/null)"
+            if [ -n "$rooted" ] && [ "${rooted#/}" != "$rooted" ]; then
+                printf '%s' "$rooted"
+                return 0
+            fi
+        fi
+    done
+
+    # fallback: resolve /var/jb symlink target
+    if [ -d /var/jb ]; then
+        rooted="$(cd /var/jb 2>/dev/null && pwd -P)"
+        if [ -n "$rooted" ] && [ "${rooted#/}" != "$rooted" ]; then
+            printf '%s' "$rooted/var/mobile/Library/Preferences"
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
+CACHE3=""
+if JB_PREFS_DIR="$(resolve_jbroot)"; then
+    CACHE3="$JB_PREFS_DIR/com.chargelimiter.mod.containerpath"
+fi
+
+case "$1" in
+    remove|purge)
+        rm -f "$CACHE1" "$CACHE2"
+        [ -n "$CACHE3" ] && rm -f "$CACHE3"
+        ;;
+esac
+
+uicache -p "$APP_DIR" 2>/dev/null
+
+exit 0
