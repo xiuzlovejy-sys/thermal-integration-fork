@@ -249,7 +249,7 @@ static double CLContinuousSeconds(void) {
 }
 
 - (void)logEvaluation:(NSInteger)level action:(NSInteger)action reason:(NSString *)reason {
-    NSTimeInterval now = [NSDate timeIntervalSince1970];
+    NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
     BOOL changed = !self.hasLoggedOnce
                    || level != self.loggedLevel
                    || action != self.loggedAction;
