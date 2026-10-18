@@ -135,13 +135,20 @@ def branding_guard():
         except (UnicodeDecodeError, OSError):
             return False
 
+    # 版本单一来源：以 pbxproj 的 MARKETING_VERSION 为准，control 三份必须与之一致。
+    # 不写死版本号，否则每次发版都要改守卫（第一次 1.0.1 就撞上了）。
+    import re as _re
+    project_text = (ROOT / 'ChargeLimiter.xcodeproj/project.pbxproj').read_text()
+    versions = set(_re.findall(r'MARKETING_VERSION = ([0-9.]+);', project_text))
+    assert len(versions) == 1, f'MARKETING_VERSION inconsistent: {versions}'
+    version = versions.pop()
     for rel in ('ChargeLimiter/Package/DEBIAN/control',
                 'ChargeLimiter/Package_roothide/DEBIAN/control',
                 'ChargeLimiter/Package_rootless/DEBIAN/control'):
         text = (ROOT / rel).read_text()
         assert 'Package: com.jy.charge' in text, f'{rel}: package id not rebranded'
         assert "Name: Jy's charge" in text, f'{rel}: name not rebranded'
-        assert 'Version: 1.0.0' in text, f'{rel}: version not rebranded'
+        assert f'Version: {version}' in text, f'{rel}: control version != {version}'
     tracked = subprocess.run(['git', 'ls-files'], capture_output=True, text=True,
                              check=True).stdout.split()
     stale = [p for p in tracked

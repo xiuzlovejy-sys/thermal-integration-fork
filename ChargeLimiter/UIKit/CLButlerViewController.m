@@ -11,7 +11,6 @@
 
 #import "CLButlerViewController.h"
 #import "CLAPIClient.h"
-#import "Controllers/CLSettingsViewController.h"
 
 // ---- 配色（暗色科技感）----
 static UIColor *CLColorBG(void)      { return [UIColor colorWithRed:0.043 green:0.071 blue:0.125 alpha:1.0]; }
@@ -94,6 +93,11 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
 @property (nonatomic, strong) NSDictionary *conf;
 @property (nonatomic, strong) NSTimer *refreshTimer;
 @property (nonatomic, assign) BOOL applyingRemoteValues;
+// 用户正在拖动/刚提交：2 秒内不用远端值回填，避免"松手弹回"（轮询与用户操作竞争）。
+@property (nonatomic, assign) BOOL userEditing;
+@property (nonatomic, assign) NSTimeInterval lastUserWriteTs;
+// 保存结果反馈：写入被拒绝时不能静默装作成功。
+@property (nonatomic, strong) UILabel *statusLabel;
 
 // 显式声明（避免"方法定义在使用之后"的实例方法解析差异，编译更稳）
 - (void)refresh;
@@ -104,10 +108,12 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
 - (void)updateStartLabel;
 - (void)thermalToggled:(UISwitch *)sender;
 - (void)maxChanged:(UISlider *)sender;
-- (void)maxCommitted:(UISlider *)sender;
 - (void)startChanged:(UISlider *)sender;
-- (void)startCommitted:(UISlider *)sender;
-- (void)openMoreSettings;
+- (void)commitMax;
+- (void)commitStart;
+- (void)writeKey:(NSString *)key value:(id)value;
+- (void)showStatus:(NSString *)text ok:(BOOL)ok;
+- (void)clearStatus;
 
 @end
 
@@ -320,7 +326,7 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
     self.maxSlider.minimumTrackTintColor = CLColorTeal();
     self.maxSlider.maximumTrackTintColor = [UIColor colorWithWhite:1.0 alpha:0.12];
     [self.maxSlider addTarget:self action:@selector(maxChanged:) forControlEvents:UIControlEventValueChanged];
-    [self.maxSlider addTarget:self action:@selector(maxCommitted:) forControlEvents:UIControlEventTouchUpInside | UIControlEventTouchUpOutside];
+    [self.maxSlider addTarget:self action:@selector(maxChanged:) forControlEvents:UIControlEventTouchDown];
 
     [maxCard addSubview:maxTitle];
     [maxCard addSubview:self.maxValueLabel];
@@ -356,7 +362,7 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
     self.startSlider.minimumTrackTintColor = CLColorAmber();
     self.startSlider.maximumTrackTintColor = [UIColor colorWithWhite:1.0 alpha:0.12];
     [self.startSlider addTarget:self action:@selector(startChanged:) forControlEvents:UIControlEventValueChanged];
-    [self.startSlider addTarget:self action:@selector(startCommitted:) forControlEvents:UIControlEventTouchUpInside | UIControlEventTouchUpOutside];
+    [self.startSlider addTarget:self action:@selector(startChanged:) forControlEvents:UIControlEventTouchDown];
     self.startDetailLabel = [self label:@"轻度 35℃ · 中度 39℃ · 紧急 44℃" size:12 weight:UIFontWeightRegular color:CLColorSub()];
     self.startDetailLabel.numberOfLines = 0;
 
@@ -381,16 +387,13 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
         [self.startDetailLabel.bottomAnchor constraintEqualToAnchor:startCard.bottomAnchor constant:-18],
     ]];
 
-    // ---- 更多设置 ----
-    UIButton *more = [UIButton buttonWithType:UIButtonTypeSystem];
-    more.translatesAutoresizingMaskIntoConstraints = NO;
-    [more setTitle:@"更多设置" forState:UIControlStateNormal];
-    [more setTitleColor:CLColorSub() forState:UIControlStateNormal];
-    more.titleLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
-    [more addTarget:self action:@selector(openMoreSettings) forControlEvents:UIControlEventTouchUpInside];
-    [stack addArrangedSubview:more];
+    // ---- 保存状态（写入被拒时可见；成功时短暂显示"已保存"）----
+    self.statusLabel = [self label:@"" size:12 weight:UIFontWeightRegular color:CLColorSub()];
+    self.statusLabel.textAlignment = NSTextAlignmentCenter;
+    self.statusLabel.numberOfLines = 0;
+    [stack addArrangedSubview:self.statusLabel];
     [NSLayoutConstraint activateConstraints:@[
-        [more.heightAnchor constraintEqualToConstant:44],
+        [self.statusLabel.heightAnchor constraintGreaterThanOrEqualToConstant:20],
     ]];
 }
 
@@ -484,6 +487,10 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
 
 - (void)renderSettings {
     if (self.applyingRemoteValues) return;
+    // 用户正在拖动、或刚提交不到 2 秒：不回填远端值。轮询是 2 秒一次，
+    // 若不放行，松手瞬间就会被上一轮 get_conf 的旧值拉回去（表现为"弹回默认"）。
+    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+    if (self.userEditing || (now - self.lastUserWriteTs) < 2.0) return;
     self.applyingRemoteValues = YES;
 
     [self.thermalSwitch setOn:[self boolFromConf:@"jy_thermal_enabled" fallback:YES] animated:NO];
@@ -512,53 +519,89 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
 
 #pragma mark - 设置写入
 
+// 统一写入：把 daemon 的拒绝显式暴露出来。以前静默失败，界面表现为"值自己弹回去"，
+// 排查只能靠猜；现在能看到具体状态码。
+- (void)writeKey:(NSString *)key value:(id)value {
+    [[CLAPIClient shared] setConfigWithKey:key value:value completion:^(NSDictionary *response, NSError *error) {
+        if (error != nil) {
+            [self showStatus:[NSString stringWithFormat:@"%@ 保存失败：连接错误", key] ok:NO];
+            return;
+        }
+        NSInteger status = [response[@"status"] integerValue];
+        if (status != 0) {
+            [self showStatus:[NSString stringWithFormat:@"%@ 被拒绝（%ld）", key, (long)status] ok:NO];
+        }
+    }];
+}
+
+- (void)showStatus:(NSString *)text ok:(BOOL)ok {
+    self.statusLabel.text = text;
+    self.statusLabel.textColor = ok ? CLColorTeal() : CLColorRed();
+    if (ok) {
+        [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(clearStatus) object:nil];
+        [self performSelector:@selector(clearStatus) withObject:nil afterDelay:1.6];
+    }
+}
+
+- (void)clearStatus {
+    self.statusLabel.text = @"";
+}
+
 - (void)thermalToggled:(UISwitch *)sender {
     BOOL on = sender.isOn;
-    [[CLAPIClient shared] setConfigWithKey:@"jy_thermal_enabled" value:@(on) completion:nil];
+    self.lastUserWriteTs = [NSDate timeIntervalSinceReferenceDate];
+    // 先开主开关：daemon 在 g_enable=NO 时会对 set_conf 做白名单拦截。
     if (on) {
-        // daemon 主开关关闭时所有 set_conf 都会被拒绝（master_off 白名单），先打开。
-        [[CLAPIClient shared] setConfigWithKey:@"enable" value:@YES completion:nil];
+        [self writeKey:@"enable" value:@YES];
     }
+    [self writeKey:@"jy_thermal_enabled" value:@(on)];
+    [self showStatus:on ? @"温控已开启" : @"温控已关闭" ok:YES];
 }
 
 - (void)maxChanged:(UISlider *)sender {
     [self updateMaxLabel];
+    self.userEditing = YES;
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(commitMax) object:nil];
+    [self performSelector:@selector(commitMax) withObject:nil afterDelay:0.35];
 }
 
-- (void)maxCommitted:(UISlider *)sender {
-    int maxPercent = (int)lroundf(sender.value);
+- (void)commitMax {
+    int maxPercent = (int)lroundf(self.maxSlider.value);
     int resume = MAX(20, maxPercent - 5);
-    [[CLAPIClient shared] setConfigWithKey:@"jy_max_percent" value:@(maxPercent) completion:nil];
+    self.userEditing = NO;
+    self.lastUserWriteTs = [NSDate timeIntervalSinceReferenceDate];
+    [self writeKey:@"jy_max_percent" value:@(maxPercent)];
     // 真正执行停充的是上游状态机：charge_above 到顶停、charge_below 回落恢复。
-    [[CLAPIClient shared] setConfigWithKey:@"charge_above" value:@(maxPercent) completion:nil];
-    [[CLAPIClient shared] setConfigWithKey:@"charge_below" value:@(resume) completion:nil];
+    [self writeKey:@"charge_above" value:@(maxPercent)];
+    [self writeKey:@"charge_below" value:@(resume)];
+    [self showStatus:[NSString stringWithFormat:@"最大充电 %d%% · 低于 %d%% 恢复", maxPercent, resume] ok:YES];
     NSLog(@"[Jy] max charge -> %d%% (resume %d%%)", maxPercent, resume);
 }
 
 - (void)startChanged:(UISlider *)sender {
     [self updateStartLabel];
+    self.userEditing = YES;
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(commitStart) object:nil];
+    [self performSelector:@selector(commitStart) withObject:nil afterDelay:0.35];
 }
 
-- (void)startCommitted:(UISlider *)sender {
-    int riseLight = (int)lroundf(sender.value);
+- (void)commitStart {
+    int riseLight = (int)lroundf(self.startSlider.value);
     int riseModerate = riseLight + 4;
     int fallLight = MAX(20, riseLight - 2);
     int fallModerate = riseLight + 1;
     int emergency = riseLight + 9;
-    [[CLAPIClient shared] setConfigWithKey:@"jy_rise_light" value:@(riseLight) completion:nil];
-    [[CLAPIClient shared] setConfigWithKey:@"jy_rise_moderate" value:@(riseModerate) completion:nil];
-    [[CLAPIClient shared] setConfigWithKey:@"jy_fall_light" value:@(fallLight) completion:nil];
-    [[CLAPIClient shared] setConfigWithKey:@"jy_fall_moderate" value:@(fallModerate) completion:nil];
-    [[CLAPIClient shared] setConfigWithKey:@"jy_emergency" value:@(emergency) completion:nil];
+    self.userEditing = NO;
+    self.lastUserWriteTs = [NSDate timeIntervalSinceReferenceDate];
+    [self writeKey:@"jy_rise_light" value:@(riseLight)];
+    [self writeKey:@"jy_rise_moderate" value:@(riseModerate)];
+    [self writeKey:@"jy_fall_light" value:@(fallLight)];
+    [self writeKey:@"jy_fall_moderate" value:@(fallModerate)];
+    [self writeKey:@"jy_emergency" value:@(emergency)];
+    [self showStatus:[NSString stringWithFormat:@"轻度 %d℃ · 中度 %d℃ · 紧急 %d℃",
+                      riseLight, riseModerate, emergency] ok:YES];
     NSLog(@"[Jy] thermal thresholds -> light %d / moderate %d / emergency %d",
           riseLight, riseModerate, emergency);
-}
-
-#pragma mark - 导航
-
-- (void)openMoreSettings {
-    CLSettingsViewController *vc = [[CLSettingsViewController alloc] init];
-    [self.navigationController pushViewController:vc animated:YES];
 }
 
 @end

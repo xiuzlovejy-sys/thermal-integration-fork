@@ -5098,6 +5098,12 @@ static NSDictionary* CLMasterOffGateRequest(NSString* api, NSDictionary* nsreq) 
         if ([key isEqualToString:@"limit_only_mode"]) {
             return nil;
         }
+        // Jy's charge 自有设置（jy_ 前缀）：纯 App 侧参数，单靠自己不产生任何系统写
+        // （温控决策在 g_enable 关闭时根本不会执行）。主开关关着也必须能保存，
+        // 否则界面表现为"拉到某个值一松手就弹回默认"。
+        if ([key hasPrefix:@"jy_"]) {
+            return nil;
+        }
         return @{@"status": @(-403),
                  @"error": @"master_switch_off",
                  @"key": key ?: @""};
