@@ -244,8 +244,13 @@ normalize_debian_text() {
   # 设备端 dpkg -i 执行 maintainer 脚本报 "\r: command not found"。
   # staging 后、打包前统一归一。awk sub(/\r$/) BSD/GNU 双兼容。
   # 注意：定义必须位于所有 stage 段落之前（bash 顺序执行，先定义后调用）。
+  # 用 cat > 回写而非 mv：mv 会把文件权限洗成 644，dpkg-deb 要求
+  # maintainer 脚本 >=0555（曾因此报 "postinst has bad permissions 644"）。
   find "$1/DEBIAN" -type f | while IFS= read -r f; do
-    awk '{ sub(/\r$/, ""); print }' "$f" > "$f.lf.tmp" && mv "$f.lf.tmp" "$f"
+    awk '{ sub(/\r$/, ""); print }' "$f" > "$f.lf.tmp" && cat "$f.lf.tmp" > "$f" && rm -f "$f.lf.tmp"
+  done
+  for m in postinst prerm postrm; do
+    [ -f "$1/DEBIAN/$m" ] && chmod 755 "$1/DEBIAN/$m"
   done
 }
 
