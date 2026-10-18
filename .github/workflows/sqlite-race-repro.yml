@@ -53,8 +53,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Install sqlite3 dev
-        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev
+      - name: Install sqlite3 dev and clang
+        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev clang
 
       - name: Run sqlite race repro
         env:

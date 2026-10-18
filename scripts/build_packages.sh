@@ -587,6 +587,8 @@ if [ "$BUILD_ROOTFUL_PKG" = "1" ] || [ "$BUILD_ROOTLESS_PKG" = "1" ]; then
   clean_host_metadata "$STAGE_ROOTLESS_DIR"
   chmod 755 "$STAGE_ROOTFUL_DIR/DEBIAN" "$STAGE_ROOTLESS_DIR/DEBIAN"
   chmod 755 "$STAGE_ROOTFUL_DIR/DEBIAN"/* "$STAGE_ROOTLESS_DIR/DEBIAN"/*
+  normalize_debian_text "$STAGE_ROOTFUL_DIR"
+  normalize_debian_text "$STAGE_ROOTLESS_DIR"
   set_control_version "$STAGE_ROOTFUL_DIR/DEBIAN/control"
   set_control_version "$STAGE_ROOTLESS_DIR/DEBIAN/control"
 else
@@ -614,6 +616,7 @@ if [ "$BUILD_NATIVE_ROOTHIDE" = "1" ]; then
   clean_host_metadata "$STAGE_ROOTHIDE_DIR"
   chmod 755 "$STAGE_ROOTHIDE_DIR/DEBIAN"
   chmod 755 "$STAGE_ROOTHIDE_DIR/DEBIAN"/*
+  normalize_debian_text "$STAGE_ROOTHIDE_DIR"
   set_control_version "$STAGE_ROOTHIDE_DIR/DEBIAN/control"
   set_roothide_control_arch "$STAGE_ROOTHIDE_DIR/DEBIAN/control"
 else
@@ -704,11 +707,22 @@ check_deb_field() {
   field="$2"
   expected="$3"
 
-  actual="$(dpkg-deb -f "$deb_path" "$field")"
+  # tr -d '\r' 防御：CRLF control 会让 dpkg-deb -f 读出带 \r 的值（上游仓库行尾混排）。
+  actual="$(dpkg-deb -f "$deb_path" "$field" | tr -d '\r')"
   if [ "$actual" != "$expected" ]; then
     echo "[ERR] Unexpected $field in $deb_path: expected $expected, got $actual" >&2
     exit 1
   fi
+}
+
+normalize_debian_text() {
+  # dpkg 要求 control 与 maintainer 脚本为 LF 行尾。上游仓库 CRLF/LF 混排
+  # （见 2026-10-18 行尾对齐事件），CRLF 会让 dpkg-deb -f 字段值带 \r、
+  # 设备端 dpkg -i 执行 maintainer 脚本报 "\r: command not found"。
+  # staging 后、打包前统一归一。awk sub(/\r$/) BSD/GNU 双兼容。
+  find "$1/DEBIAN" -type f | while IFS= read -r f; do
+    awk '{ sub(/\r$/, ""); print }' "$f" > "$f.lf.tmp" && mv "$f.lf.tmp" "$f"
+  done
 }
 
 check_no_host_metadata() {
