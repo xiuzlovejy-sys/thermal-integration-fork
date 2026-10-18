@@ -15,6 +15,11 @@ ALLOW = ('ChargeLimiter/OfflineAdvisory/', 'tests/offline_advisory/',
          # 产品源码（ChargeLimiter/ 与 xcodeproj，含 daemon.mm 注册断言）仍逐字节守卫。
          'scripts/build_packages.sh',
          '.github/', '.gitignore',
+         # roothide/rootless 分叉构建方案（scheme 文件，2026-10-18 登记）：
+         # build_packages.sh --roothide-only 构建 "ChargeLimiter roothide" scheme，
+         # 这两个 xcscheme 为打包管线授权偏离；pbxproj 等其他 xcodeproj 文件仍逐字节守卫。
+         'ChargeLimiter.xcodeproj/xcshareddata/xcschemes/ChargeLimiter roothide.xcscheme',
+         'ChargeLimiter.xcodeproj/xcshareddata/xcschemes/ChargeLimiter rootless.xcscheme',
          'out/', 'build_rootful/', 'build_rootless/', 'build_roothide/', 'Payload/',
          'ChargeLimiter/libroot.a', 'ChargeLimiter/libroothide.tbd')
 

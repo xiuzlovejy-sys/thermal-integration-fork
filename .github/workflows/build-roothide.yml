@@ -27,14 +27,23 @@ jobs:
           printf 'int probe_symbol(void){return 1;}\n' > probe.c
           xcrun -sdk iphoneos clang -arch arm64e -c probe.c -o probe-arm64e.o
           xcrun -sdk iphoneos clang -arch arm64  -c probe.c -o probe-arm64.o
+          file probe-arm64e.o probe-arm64.o || true
+          xxd probe-arm64e.o | head -2 || true
           python3 - <<'PY'
           import struct, sys
 
           def macho(path):
               with open(path, 'rb') as f:
                   data = f.read(16)
-              assert data[:4] == b'\xcf\xfa\xed\xfe', f'{path}: not a 64-bit Mach-O'
-              _, cputype, cpusub = struct.unpack('<III', data[4:16])
+              print(f'{path}: header hex = {data.hex()}')
+              magic = data[:4]
+              if magic == b'\xcf\xfa\xed\xfe':
+                  endian = '<'
+              elif magic == b'\xfe\xed\xfa\xcf':
+                  endian = '>'
+              else:
+                  raise AssertionError(f'{path}: not a 64-bit Mach-O (magic={magic.hex()})')
+              _, cputype, cpusub = struct.unpack(endian + 'III', data[4:16])
               return cputype, cpusub
 
           ct, cs = macho('probe-arm64e.o')
