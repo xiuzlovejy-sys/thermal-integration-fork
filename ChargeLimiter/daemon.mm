@@ -1861,7 +1861,7 @@ static void scheduleChargeStopVerification(void) {
             props[@"IsCharging"] = @NO;
             props[@"PredictiveChargingInhibit"] = @YES;
             ret = IORegistryEntrySetCFProperties(serv, (__bridge CFTypeRef)props);
-            IOObjectRelease(serv);
+            // 不 IOObjectRelease：serv 是共享缓存句柄（借用引用）。
         }
         NSDictionary* extras = @{
             @"instant_amperage": @(current),
@@ -3368,7 +3368,8 @@ static void releaseStaleInhibitAtBoot(void) {
         [CLThermalGovernor appendLogLine:[NSString stringWithFormat:
             @"%@ [boot] 释放残留停充锁（异常退出兜底）", [df stringFromDate:[NSDate date]]]];
     }
-    IOObjectRelease(serv);
+    // 注意：serv 是 getIOPMPSServ() 的共享缓存句柄（借用引用），绝不能 IOObjectRelease，
+    // 否则缓存失效 → 后续 getBatInfo 使用已释放句柄 → 双重释放崩溃（真机 2026-10-20）。
 }
 
 static void performAcccharge(BOOL flag) {
