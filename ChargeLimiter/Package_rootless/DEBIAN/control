@@ -1,6 +1,6 @@
 Package: com.jy.charge
 Name: Jy's charge
-Version: 1.0.17
+Version: 1.0.18
 Description: 柔性温控充电：按温度实时调节充电功率，并可按电量上限停止充电
 Section: Applications
 Depends: firmware (>= 13.0)

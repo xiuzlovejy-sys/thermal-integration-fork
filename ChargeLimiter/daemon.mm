@@ -5438,6 +5438,45 @@ NSDictionary* handleReq(NSDictionary* nsreq) {
         }
         [out appendString:@"\n"];
 
+        // ---- 2.5) 充电器服务（AppleSMCCharger*）全量属性 + 可写性 ----
+        // 充电电流的控制寄存器在独立的 charger 服务上，不在 AppleSmartBattery。
+        // 逐个 dump 属性，并对数值/布尔键做"写回原值"可写性探针。
+        [out appendString:@"== 充电器服务属性 + 可写性 ==\n"];
+        io_iterator_t cit = 0;
+        if (IOServiceGetMatchingServices(kIOMasterPortDefault, IOServiceMatching("IOService"), &cit) == KERN_SUCCESS && cit != 0) {
+            io_service_t csvc;
+            while ((csvc = IOIteratorNext(cit)) != IO_OBJECT_NULL) {
+                io_name_t cnm = {0};
+                if (IORegistryEntryGetName(csvc, cnm) != KERN_SUCCESS) { IOObjectRelease(csvc); continue; }
+                NSString *cname = [NSString stringWithUTF8String:cnm];
+                if (![cname.lowercaseString containsString:@"charger"]) { IOObjectRelease(csvc); continue; }
+                CFMutableDictionaryRef craw = NULL;
+                if (IORegistryEntryCreateCFProperties(csvc, &craw, kCFAllocatorDefault, 0) != KERN_SUCCESS || !craw) { IOObjectRelease(csvc); continue; }
+                NSDictionary *cd = CFBridgingRelease(craw);
+                [out appendFormat:@"\n== %@ ==  (共 %lu 键)\n", cname, (unsigned long)cd.count];
+                for (NSString *k in [[cd allKeys] sortedArrayUsingSelector:@selector(compare:)]) {
+                    id v = cd[k];
+                    NSString *desc;
+                    if ([v isKindOfClass:[NSDictionary class]] || [v isKindOfClass:[NSArray class]] || [v isKindOfClass:[NSData class]]) {
+                        desc = [NSString stringWithFormat:@"<%@>", NSStringFromClass([v class])];
+                    } else {
+                        desc = [v description];
+                    }
+                    NSString *wr = @"";
+                    if ([v isKindOfClass:[NSNumber class]]) {
+                        kern_return_t kr = IORegistryEntrySetCFProperties(csvc, (__bridge CFDictionaryRef)@{k: v});
+                        if (kr == KERN_SUCCESS) wr = @"  [可写✓]";
+                        else if (kr == -536870206) wr = @"  [只读]";
+                        else wr = [NSString stringWithFormat:@"  [kr=0x%x]", kr];
+                    }
+                    [out appendFormat:@"  %@ = %@%@\n", k, desc, wr];
+                }
+                IOObjectRelease(csvc);
+            }
+            IOObjectRelease(cit);
+        }
+        [out appendString:@"\n"];
+
         // ---- 3) 全量属性（对照）----
         void (^dumpService)(NSString *) = ^(NSString *match) {
             io_service_t s = IOServiceGetMatchingService(kIOMasterPortDefault,
