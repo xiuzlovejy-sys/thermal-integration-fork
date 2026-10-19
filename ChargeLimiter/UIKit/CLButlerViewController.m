@@ -132,6 +132,7 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
 - (void)clearLog;
 - (void)logToggled:(UISwitch *)sender;
 - (void)restartThermald;
+- (void)probeHW;
 
 @end
 
@@ -432,6 +433,13 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
     logRestart.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
     [logRestart addTarget:self action:@selector(restartThermald) forControlEvents:UIControlEventTouchUpInside];
 
+    UIButton *logHW = [UIButton buttonWithType:UIButtonTypeSystem];
+    logHW.translatesAutoresizingMaskIntoConstraints = NO;
+    [logHW setTitle:@"硬件探测" forState:UIControlStateNormal];
+    [logHW setTitleColor:CLColorTeal() forState:UIControlStateNormal];
+    logHW.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightRegular];
+    [logHW addTarget:self action:@selector(probeHW) forControlEvents:UIControlEventTouchUpInside];
+
     // 记录开关：默认开，排障后可以彻底关掉（关闭后 daemon 不再写任何日志行）。
     self.logSwitch = [[UISwitch alloc] init];
     self.logSwitch.translatesAutoresizingMaskIntoConstraints = NO;
@@ -458,6 +466,7 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
     [logCard addSubview:logToggle];
     [logCard addSubview:logClear];
     [logCard addSubview:logRestart];
+    [logCard addSubview:logHW];
     [logCard addSubview:self.logSwitch];
     [logCard addSubview:self.logInfoLabel];
     [logCard addSubview:self.logTextView];
@@ -475,6 +484,9 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
 
         [logRestart.centerYAnchor constraintEqualToAnchor:logToggle.centerYAnchor],
         [logRestart.trailingAnchor constraintEqualToAnchor:logClear.leadingAnchor constant:-8],
+
+        [logHW.centerYAnchor constraintEqualToAnchor:logToggle.centerYAnchor],
+        [logHW.trailingAnchor constraintEqualToAnchor:logRestart.leadingAnchor constant:-10],
 
         [self.logInfoLabel.topAnchor constraintEqualToAnchor:logToggle.bottomAnchor constant:4],
         [self.logInfoLabel.leadingAnchor constraintEqualToAnchor:logToggle.leadingAnchor],
@@ -807,8 +819,25 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC),
                            dispatch_get_main_queue(), ^{ [weakSelf loadLog]; });
         } else {
-            [weakSelf showStatus:@"未找到 thermalmonitord" ok:NO];
+            NSString *err = [data[@"error"] isKindOfClass:[NSString class]] ? data[@"error"] : @"未找到";
+            [weakSelf showStatus:[NSString stringWithFormat:@"重启失败：%@", err] ok:NO];
         }
+    }];
+}
+
+- (void)probeHW {
+    [self showStatus:@"正在探测硬件寄存器…" ok:YES];
+    __weak typeof(self) weakSelf = self;
+    [[CLAPIClient shared] sendRequest:@{@"api": @"jy_hw"}
+                          completion:^(NSDictionary *response, NSError *error) {
+        NSDictionary *data = [response[@"data"] isKindOfClass:[NSDictionary class]] ? response[@"data"] : nil;
+        NSString *text = [data[@"text"] isKindOfClass:[NSString class]] ? data[@"text"] : @"（探测失败）";
+        weakSelf.logTextView.text = text;
+        weakSelf.logTextView.hidden = NO;
+        weakSelf.logHeight.constant = 400;
+        [weakSelf.logTimer invalidate];
+        weakSelf.logTimer = nil;
+        [weakSelf showStatus:@"硬件属性已 dump（滚动日志面板查看/复制）" ok:YES];
     }];
 }
 

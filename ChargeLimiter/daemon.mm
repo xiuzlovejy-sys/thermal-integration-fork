@@ -5080,7 +5080,7 @@ static NSDictionary* CLMasterOffGateRequest(NSString* api, NSDictionary* nsreq) 
             @"get_conf", @"get_bat_info", @"get_mcl_diagnostics", @"get_statistics",
             @"get_policy_events", @"get_diag", @"reload_conf",
             // Jy's charge 运行日志（纯读取/清空本地日志文件，不触碰系统状态）
-            @"jy_log", @"jy_log_clear",
+            @"jy_log", @"jy_log_clear", @"jy_hw",
             // 诊断：重启 thermalmonitord 以触发 dylib 注入（用户显式点按）
             @"jy_restart_thermald",
             // 修复/还原类（D1）
@@ -5379,6 +5379,34 @@ NSDictionary* handleReq(NSDictionary* nsreq) {
                  @"data": @{@"text": combined,
                             @"size": attrs[NSFileSize] ?: @0,
                             @"path": path ?: @""}};
+    } else if ([api isEqualToString:@"jy_hw"]) {
+        // 硬件探测（注入无关的柔性路径侦察）：dump 电池/电源/SMC 服务的全量 IOKit
+        // 属性——从中找是否存在可直接写的"充电电流上限/充电速率"键。结果经日志面板展示。
+        NSMutableString *out = [NSMutableString string];
+        void (^dumpService)(NSString *) = ^(NSString *match) {
+            io_service_t s = IOServiceGetMatchingService(kIOMasterPortDefault,
+                                                         IOServiceMatching(match.UTF8String));
+            if (s == IO_OBJECT_NULL) {
+                [out appendFormat:@"== %@ == NOT FOUND\n\n", match];
+                return;
+            }
+            CFMutableDictionaryRef raw = NULL;
+            if (IORegistryEntryCreateCFProperties(s, &raw, kCFAllocatorDefault, 0) == KERN_SUCCESS && raw) {
+                NSDictionary *d = CFBridgingRelease(raw);
+                [out appendFormat:@"== %@ ==\n", match];
+                for (NSString *k in [[d allKeys] sortedArrayUsingSelector:@selector(compare:)]) {
+                    id v = d[k];
+                    [out appendFormat:@"  %@ = [%@] %@\n", k,
+                     v ? NSStringFromClass([v class]) : @"nil", v];
+                }
+                [out appendString:@"\n"];
+            }
+            IOObjectRelease(s);
+        };
+        dumpService(@"AppleSMC");
+        dumpService(@"AppleSmartBattery");
+        dumpService(@"IOPMPowerSource");
+        return @{@"status": @0, @"data": @{@"text": out}};
     } else if ([api isEqualToString:@"jy_log_clear"]) {
         [CLThermalGovernor clearLog];
         return @{@"status": @0, @"data": @{}};
