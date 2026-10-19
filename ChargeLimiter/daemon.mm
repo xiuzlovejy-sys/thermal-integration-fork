@@ -5380,16 +5380,69 @@ NSDictionary* handleReq(NSDictionary* nsreq) {
                             @"size": attrs[NSFileSize] ?: @0,
                             @"path": path ?: @""}};
     } else if ([api isEqualToString:@"jy_hw"]) {
-        // 硬件探测（注入无关的柔性路径侦察）：dump 电池/电源/SMC 服务的全量 IOKit
-        // 属性——从中找是否存在可直接写的"充电电流上限/充电速率"键。结果经日志面板展示。
+        // 硬件探测（注入无关的柔性路径侦察）。三段：
+        // 1) 可写性探针：读原值→写回原值（无状态变化，安全），按 kIOReturn 判定可写性；
+        // 2) 充电相关服务扫描：枚举 IOKit 里名字含 charger/pmu/batt/smc 的服务；
+        // 3) AppleSmartBattery 全量属性（对照已有 dump）。
         NSMutableString *out = [NSMutableString string];
+
+        // ---- 1) 可写性探针 ----
+        [out appendString:@"== 可写性探针 (写回原值) ==\n"];
+        io_service_t bs = IOServiceGetMatchingService(kIOMasterPortDefault,
+                                                      IOServiceMatching("AppleSmartBattery"));
+        if (bs != IO_OBJECT_NULL) {
+            CFMutableDictionaryRef raw = NULL;
+            if (IORegistryEntryCreateCFProperties(bs, &raw, kCFAllocatorDefault, 0) == KERN_SUCCESS && raw) {
+                NSDictionary *all = CFBridgingRelease(raw);
+                NSArray *keys = @[@"PredictiveChargingInhibit", @"ExternalConnected",
+                                  @"ChargingOverride", @"InflowOverride",
+                                  @"ChargerConfiguration", @"BestAdapterIndex",
+                                  @"IsCharging", @"FullyCharged"];
+                for (NSString *key in keys) {
+                    id v = all[key];
+                    if (v == nil) { [out appendFormat:@"  %@ : (无此键)\n", key]; continue; }
+                    kern_return_t kr = IORegistryEntrySetCFProperties(bs, (__bridge CFDictionaryRef)@{key: v});
+                    NSString *tag = (kr == KERN_SUCCESS) ? @"可写 ✓"
+                        : (kr == -536870206 ? @"只读(BadArgument)" : [NSString stringWithFormat:@"kr=0x%x", kr]);
+                    [out appendFormat:@"  %@ : %@  (当前值 %@)\n", key, tag, v];
+                }
+            }
+            IOObjectRelease(bs);
+        } else {
+            [out appendString:@"  AppleSmartBattery 未找到\n"];
+        }
+        [out appendString:@"\n"];
+
+        // ---- 2) 充电相关服务名扫描 ----
+        [out appendString:@"== 充电相关服务扫描 ==\n"];
+        io_iterator_t it = 0;
+        if (IOServiceGetMatchingServices(kIOMasterPortDefault, IOServiceMatching("IOService"), &it) == KERN_SUCCESS && it != 0) {
+            io_service_t svc;
+            int hit = 0;
+            while ((svc = IOIteratorNext(it)) != IO_OBJECT_NULL && hit < 80) {
+                io_name_t nm = {0};
+                if (IORegistryEntryGetName(svc, nm) == KERN_SUCCESS) {
+                    NSString *name = [NSString stringWithUTF8String:nm];
+                    NSString *lo = [name lowercaseString];
+                    if ([lo containsString:@"harg"] || [lo containsString:@"pmu"] ||
+                        [lo containsString:@"smu"] || [lo containsString:@"batt"] ||
+                        [lo containsString:@"smc"] || [lo containsString:@"ppc"] ||
+                        [lo containsString:@"inflow"]) {
+                        [out appendFormat:@"  · %@\n", name];
+                        hit++;
+                    }
+                }
+                IOObjectRelease(svc);
+            }
+            IOObjectRelease(it);
+        }
+        [out appendString:@"\n"];
+
+        // ---- 3) 全量属性（对照）----
         void (^dumpService)(NSString *) = ^(NSString *match) {
             io_service_t s = IOServiceGetMatchingService(kIOMasterPortDefault,
                                                          IOServiceMatching(match.UTF8String));
-            if (s == IO_OBJECT_NULL) {
-                [out appendFormat:@"== %@ == NOT FOUND\n\n", match];
-                return;
-            }
+            if (s == IO_OBJECT_NULL) { [out appendFormat:@"== %@ == NOT FOUND\n\n", match]; return; }
             CFMutableDictionaryRef raw = NULL;
             if (IORegistryEntryCreateCFProperties(s, &raw, kCFAllocatorDefault, 0) == KERN_SUCCESS && raw) {
                 NSDictionary *d = CFBridgingRelease(raw);
@@ -5403,9 +5456,7 @@ NSDictionary* handleReq(NSDictionary* nsreq) {
             }
             IOObjectRelease(s);
         };
-        dumpService(@"AppleSMC");
         dumpService(@"AppleSmartBattery");
-        dumpService(@"IOPMPowerSource");
         return @{@"status": @0, @"data": @{@"text": out}};
     } else if ([api isEqualToString:@"jy_log_clear"]) {
         [CLThermalGovernor clearLog];
