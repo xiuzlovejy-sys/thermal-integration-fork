@@ -1729,6 +1729,7 @@ static BOOL shouldFallbackFromPredictiveInhibitStop(BOOL isAdaptorConnected,
 }
 
 static uint64_t g_chargeEnableVerifyGeneration = 0;
+static uint64_t g_chargeStopVerifyGeneration = 0;   // P0-2：停充闭环校验代次
 
 // 限流模式下电流被压制，验证阈值联动 thermal mode 降档。
 // 「充电时档位」非关闭即视为限流生效（thermal-sim-settings：锁定等级退役后不再有第二道否决）。
@@ -1804,6 +1805,41 @@ static void scheduleChargeEnableVerification(void) {
                                      @"charge_enable_unconfirmed",
                                      safeRe, extras, time(0));
         });
+    });
+}
+
+// P0-2：停充指令闭环校验（仅 emergency 停充触发；软 PWM 10s 级切换不适合 8s 延迟窗口）。
+// 下发停充后延迟 8s 读回电流：仍显著在充电说明"停充未生效"，重写一次并记事件。
+static void scheduleChargeStopVerification(void) {
+    uint64_t gen = ++g_chargeStopVerifyGeneration;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                 (int64_t)(kPredictiveInhibitFallbackVerifyDelaySeconds * NSEC_PER_SEC)),
+                   dispatch_get_global_queue(0, 0), ^{
+        if (gen != g_chargeStopVerifyGeneration || !g_jyThermalEmergencyStop) {
+            return; // 已被恢复命令取代
+        }
+        NSDictionary* snapshot = nil;
+        if (0 != getBatInfo(&snapshot)) return;
+        NSDictionary* safe = snapshot ?: @{};
+        int current = getEffectiveBatteryCurrent(safe);
+        if (current <= 100) return;   // 已停充（电流≈0），校验通过
+        // 仍在充电：停充未生效，重写兜底 + 记录
+        io_service_t serv = getIOPMPSServ();
+        kern_return_t ret = KERN_FAILURE;
+        if (serv != IO_OBJECT_NULL) {
+            NSMutableDictionary* props = [NSMutableDictionary dictionary];
+            props[@"IsCharging"] = @NO;
+            props[@"PredictiveChargingInhibit"] = @YES;
+            ret = IORegistryEntrySetCFProperties(serv, (__bridge CFTypeRef)props);
+            IOObjectRelease(serv);
+        }
+        NSDictionary* extras = @{
+            @"instant_amperage": @(current),
+            @"io_return": @(ret),
+        };
+        NSFileErrorLog(@"emergency stop unconfirmed (current=%dmA), rewritten stop ret=%d", current, ret);
+        appendPolicyEventHistory(@"charge_path_event", g_policyState ?: @"", g_policyState ?: @"",
+                                 @"charge_stop_unconfirmed", safe, extras, time(0));
     });
 }
 
@@ -3276,9 +3312,37 @@ static void resetBatteryStatusWithContext(BOOL restoreRuntimeSideEffects, NSStri
     g_lastPolicyChangeTs = now;
 }
 
+// P0-1：启动兜底 —— 释放可能残留的停充锁。
+// PredictiveChargingInhibit 仅本 daemon 写入，且是瞬态（停充期间置 YES，恢复时清 NO）。
+// daemon 在停充态被 SIGKILL 崩溃时该键会残留 YES（不触发 atexit），launchd KeepAlive
+// 重启后若无此兜底，充电会一直锁死。此函数只释放 inhibit / IsCharging，不碰
+// ExternalConnected（那是「禁流」持久设置，不应被误清）。
+static void releaseStaleInhibitAtBoot(void) {
+    io_service_t serv = getIOPMPSServ();
+    if (serv == IO_OBJECT_NULL) return;
+    CFMutableDictionaryRef raw = NULL;
+    BOOL ok = (IORegistryEntryCreateCFProperties(serv, &raw, kCFAllocatorDefault, 0) == KERN_SUCCESS) && (raw != NULL);
+    BOOL stale = NO;
+    if (ok) {
+        NSDictionary *d = CFBridgingRelease(raw);
+        stale = [d[@"PredictiveChargingInhibit"] boolValue];
+    }
+    if (stale) {
+        NSMutableDictionary *w = [NSMutableDictionary dictionary];
+        w[@"PredictiveChargingInhibit"] = @NO;
+        w[@"IsCharging"] = @YES;
+        IORegistryEntrySetCFProperties(serv, (__bridge CFTypeRef)w);
+        NSLog2(@"[Jy] boot: released stale PredictiveChargingInhibit=YES (crash leftover)");
+        NSDateFormatter *df = [[NSDateFormatter alloc] init];
+        df.dateFormat = @"MM-dd HH:mm:ss";
+        [CLThermalGovernor appendLogLine:[NSString stringWithFormat:
+            @"%@ [boot] 释放残留停充锁（异常退出兜底）", [df stringFromDate:[NSDate date]]]];
+    }
+    IOObjectRelease(serv);
+}
+
 static void performAcccharge(BOOL flag) {
-    static NSMutableDictionary* cache_status = nil;
-    BOOL acc_charge = getLocalBool(@"acc_charge", NO);
+    static NSMutableDictionary* cache_status = nil;    BOOL acc_charge = getLocalBool(@"acc_charge", NO);
     BOOL acc_charge_airmode = getLocalBool(@"acc_charge_airmode", NO);
     BOOL acc_charge_wifi = getLocalBool(@"acc_charge_wifi", NO);
     BOOL acc_charge_blue = getLocalBool(@"acc_charge_blue", NO);
@@ -4797,6 +4861,9 @@ static void clObserveOfflineAdvisory(NSDictionary* bat_info) {
         governor.emergencyHandler = ^(BOOL stop) {
             g_jyThermalEmergencyStop = stop;
             setChargeStatus(!stop);
+            if (stop) {
+                scheduleChargeStopVerification();   // P0-2：确认停充真的生效
+            }
         };
     }
     [governor evaluateBattery:bat_info];
@@ -6202,6 +6269,8 @@ void detectUPSBattery() {
         NSFileInfoLog(@"%@ listen_ready backend=bsd_socket port=%d",
                        log_prefix, GSERV_PORT);
         getBatInfo(&bat_info);
+        // P0-1：启动释放残留停充锁（daemon 停充态崩溃 → PredictiveChargingInhibit 卡 YES）。
+        releaseStaleInhibitAtBoot();
         gNotifyPort = IONotificationPortCreate(kIOMasterPortDefault);
         CFRunLoopSourceRef runSrc = IONotificationPortGetRunLoopSource(gNotifyPort);
         CFRunLoopAddSource(CFRunLoopGetCurrent(), runSrc, kCFRunLoopDefaultMode);

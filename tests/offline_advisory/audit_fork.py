@@ -58,7 +58,9 @@ ALLOW = ('ChargeLimiter/OfflineAdvisory/', 'tests/offline_advisory/',
          'out/', 'build_rootful/', 'build_rootless/', 'build_roothide/', 'Payload/',
          'ChargeLimiter/libroot.a', 'ChargeLimiter/libroothide.tbd',
          # 2026-10-19 设计文档（用户要求入库）：软 PWM 与 ChargeLimiter 温控对比。
-         '软PWM与温控开关对比.md')
+         '软PWM与温控开关对比.md',
+         # 2026-10-19 完整原理文档：核心原理/实现机制/方案对比/剩余时间设计。
+         "Jy's charge 原理与温控方案对比.md")
 
 
 def digest(path):
