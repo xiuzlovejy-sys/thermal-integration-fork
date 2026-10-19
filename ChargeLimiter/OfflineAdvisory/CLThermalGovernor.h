@@ -39,6 +39,10 @@ typedef NS_ENUM(uint64_t, CLThermalLevel) {
 // 仅在"已接电源 + 未到容量停充"时参与 PWM；否则返回 1.0（不干预）。
 - (float)pwmDuty;
 
+// PWM 是否应完全让位（温控关闭 / 未接电源 / 容量到顶 / 紧急停充）。
+// 让位时 PWM 不得写 IOKit——否则会把 1.0 当成"充电"去和容量/紧急策略对抗。
+- (BOOL)pwmShouldYield;
+
 // 只读状态快照（get_conf 上报给 App）：level / stopped / emergency / capacity。
 // temp_c / amp_ma 为最近一次电池事件实测值——App 与日志据此判断"档位是否真的
 // 带来了电流变化"（柔性调控的唯一可观测证据，控制器本身不臆造效果）。

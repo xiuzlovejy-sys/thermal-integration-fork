@@ -132,6 +132,7 @@ static NSTimer* g_jyThermalEvalTimer = nil;
 // 复用 g_jyThermalEmergencyStop + setChargeStatus 这条已验证的受控布尔通道。
 static NSTimer* g_jyPwmTimer = nil;
 static float g_jyLastDuty = 1.0f;   // PWM tick 最近一次占空比（供 ETA 用，避免重复调用有副作用的 pwmDuty）
+static BOOL g_jyPwmStopActive = NO; // 当前这次"停充"是否由软 PWM 发起（区别于紧急停充）
 // P2 剩余充电时间估算（只读，不干预控制）：滑动窗口采样。
 static NSMutableArray* g_etaSamples = nil;    // @[ @{t, mah} ] 容量窗口（保留作交叉校验）
 static NSMutableArray* g_etaAmpSamples = nil;  // 充电相电流样本（mA）
@@ -5003,6 +5004,18 @@ static void CLThermalPwmTick(void) {
         }
     }
     CLThermalGovernor* governor = [CLThermalGovernor sharedGovernor];
+    // 让位：温控关闭 / 未接电源 / 容量到顶 / 紧急停充 → PWM 完全不写 IOKit。
+    // 否则 pwmDuty=1.0 会被 tick 误解为"要充电"，主动 setChargeStatus(YES)，
+    // 与容量停充打架（真机 2026-10-20：81% 上限仍充电）。
+    if ([governor pwmShouldYield]) {
+        if (g_jyPwmStopActive) {
+            g_jyPwmStopActive = NO;
+            g_jyThermalEmergencyStop = NO;   // 只清标志，不写 IOKit，交回 applyChargePolicy
+            NSLog2(@"[Jy] pwm yield: released own stop, defer to policy");
+        }
+        g_jyLastDuty = 1.0f;
+        return;
+    }
     float duty = [governor pwmDuty];
     g_jyLastDuty = duty;   // 供 ETA 使用（电流 × 占空比 = 有效平均速率）
     BOOL stop;
@@ -5035,6 +5048,7 @@ static void CLThermalPwmTick(void) {
     }
     if (stop != g_jyThermalEmergencyStop) {
         g_jyThermalEmergencyStop = stop;
+        g_jyPwmStopActive = stop;   // 记录这次停充归属 PWM
         setChargeStatus(!stop);
         NSDateFormatter *f = [[NSDateFormatter alloc] init];
         f.dateFormat = @"MM-dd HH:mm:ss";

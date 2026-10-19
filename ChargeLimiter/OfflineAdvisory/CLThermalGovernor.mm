@@ -309,9 +309,10 @@ static NSString *CLTimestamp(void) {
     BOOL changed = !self.hasLoggedOnce
                    || level != self.loggedLevel
                    || action != self.loggedAction;
-    // 只有"真的在做事"才写心跳：充电中，或处于非零档位。
-    // 拔线且档位归零后就不再产生新行——日志自然停止增长，不需要额外定时器。
-    BOOL meaningful = self.lastCharging || level != 0;
+    // 只有"真的在做事"才写心跳：充电中，或处于非零档位（且未因容量到顶停充）。
+    // 拔线且档位归零后就不再产生新行；容量到顶停充后也停写——充电没进行、
+    // 温度不会因充电上升，每 30 秒重复同一行没有排障价值，只会白占空间。
+    BOOL meaningful = self.lastCharging || (level != 0 && !_capacityLatched);
     BOOL heartbeat = meaningful && (now - self.lastLogTs) >= 30.0;
     if (!changed && !heartbeat) return;
     self.hasLoggedOnce = YES;
@@ -384,6 +385,16 @@ static float CLDutyTarget(double effT) {
     double span = (emerg - riseMod) > 0.1 ? (emerg - riseMod) : 0.1;
     double r = (effT - riseMod) / span;
     return (float)(dutyMod - r * (dutyMod - dutyFloor));
+}
+
+- (BOOL)pwmShouldYield {
+    @synchronized(self) {
+        if (!getLocalBool(@"jy_thermal_enabled", YES)) return YES;   // 温控总开关关闭
+        if (!_adapterConnected) return YES;                          // 未接电源
+        if (_capacityLatched) return YES;                            // 容量到顶（交给执行层）
+        if (_emergencyLatched || _actuationStopped) return YES;      // 紧急停充（交给紧急通道）
+        return NO;
+    }
 }
 
 - (float)pwmDuty {
