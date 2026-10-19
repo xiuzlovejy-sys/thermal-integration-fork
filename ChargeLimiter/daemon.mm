@@ -4817,7 +4817,7 @@ static void CLThermalPwmTick(void) {
         stop = NO;
         // 诊断：占空 100% 时每 60s 记一次"为什么不限流"，避免再次出现静默失效。
         static NSTimeInterval lastIdleLog = 0;
-        NSTimeInterval nowTs = [NSDate timeIntervalSince1970];
+        NSTimeInterval nowTs = [[NSDate date] timeIntervalSince1970];
         if (nowTs - lastIdleLog > 60) {
             lastIdleLog = nowTs;
             NSDictionary *st = [governor stateSnapshot];
