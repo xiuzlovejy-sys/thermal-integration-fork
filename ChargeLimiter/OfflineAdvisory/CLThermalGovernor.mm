@@ -35,6 +35,11 @@ static NSString *const CLGovernorApplyNotification = @"com.jy.charge.thermalappl
 @property (nonatomic) float smoothDuty;             // 平滑后占空比（P1 时间低通）
 @property (nonatomic) double lastDutyTs;            // 上次平滑时间
 @property (nonatomic) BOOL hasDutyTs;
+@property (nonatomic) double prevTempC;             // 上一轮温度（dT/dt 前馈）
+@property (nonatomic) double lastTempTs;            // 上一轮温度时间
+@property (nonatomic) BOOL hasTempTs;
+@property (nonatomic) double tempTrendCPerS;        // dT/dt（℃/s）
+@property (nonatomic) NSInteger lastSoc;            // 最近一次 SOC（高 SOC 收紧）
 @property (nonatomic) CLOfflineAdvisory *advisory;   // 跨轮复用：tp_policy 状态在实例内
 // 日志节流：档位/动作变化必记，其余每 30 秒一条心跳。
 @property (nonatomic) NSInteger loggedLevel;
@@ -180,6 +185,17 @@ static double CLContinuousSeconds(void) {
     // 否则 PWM 停充后会误判成"拔电"而立刻恢复，占空比失效。
     self.adapterConnected = [bat_info[@"ExternalConnected"] boolValue] ||
                             [bat_info[@"ExternalChargeCapable"] boolValue];
+    // 温度趋势（dT/dt，℃/s）—— P1 前馈控制：快速升温时提前降占空比，消除超调。
+    double trendNowTs = CLContinuousSeconds();
+    if (self.hasTempTs) {
+        double dt = trendNowTs - self.lastTempTs;
+        if (dt > 0.5) self.tempTrendCPerS = (_lastTempC - self.prevTempC) / dt;
+    }
+    self.prevTempC = _lastTempC;
+    self.lastTempTs = trendNowTs;
+    self.hasTempTs = YES;
+    // SOC 快照 —— 高 SOC 收紧策略。
+    self.lastSoc = [bat_info[@"CurrentCapacity"] integerValue];
 
     if (self.advisory == nil) self.advisory = [CLOfflineAdvisory new];
     // 采样戳必须给：tp_step 的硬校验要求 has_age && age_s <= max_age_s，
@@ -345,26 +361,27 @@ static NSString *CLTimestamp(void) {
     };
 }
 
-// 连续占空比目标：温度 → 占空比，档位内线性插值，档位边界处连续（无跳变）。
+// 连续占空比目标：等效温度 → 占空比，档位内线性插值、边界连续（无跳变）。
+// 等效温度 = 实际温度 + dT/dt 前馈 + 高 SOC 收紧（见调用处）。
 //   ≤ rise_light:                    1.0（满速）
 //   rise_light → rise_moderate:      1.0 → moderate_duty（轻度过渡带）
 //   rise_moderate → emergency:       moderate_duty → duty_floor（中度带）
 //   ≥ emergency:                     0（由紧急 latch 处理，PWM 不参与）
-static float CLDutyTargetForTemp(double T) {
+static float CLDutyTarget(double effT) {
     double riseLight = getLocalInt(@"jy_rise_light", 30);
     double riseMod   = getLocalInt(@"jy_rise_moderate", 34);
     double emerg     = getLocalInt(@"jy_emergency", 39);
     double dutyMod   = getLocalInt(@"jy_pwm_moderate_duty", 55) / 100.0;
     double dutyFloor = getLocalInt(@"jy_pwm_duty_floor", 20) / 100.0;
-    if (T >= emerg) return 0.0f;
-    if (T <= riseLight) return 1.0f;
-    if (T <= riseMod) {
+    if (effT >= emerg) return 0.0f;
+    if (effT <= riseLight) return 1.0f;
+    if (effT <= riseMod) {
         double span = (riseMod - riseLight) > 0.1 ? (riseMod - riseLight) : 0.1;
-        double r = (T - riseLight) / span;
+        double r = (effT - riseLight) / span;
         return (float)(1.0 - r * (1.0 - dutyMod));
     }
     double span = (emerg - riseMod) > 0.1 ? (emerg - riseMod) : 0.1;
-    double r = (T - riseMod) / span;
+    double r = (effT - riseMod) / span;
     return (float)(dutyMod - r * (dutyMod - dutyFloor));
 }
 
@@ -380,10 +397,27 @@ static float CLDutyTargetForTemp(double T) {
             _smoothDuty = 1.0f; _hasDutyTs = NO;
             return 1.0f;
         }
-        // 目标占空比随温度连续变化（无档位跳变）。
-        float target = CLDutyTargetForTemp(_lastTempC);
-        // 时间低通：占空比向目标平滑滑移（时间常数 jy_pwm_smooth_tau，默认 90s），
-        // 既"随温度连续"又"随时间柔和"，杜绝单样本温度抖动导致占空比骤变。
+    // 目标占空比随"等效温度"连续变化（无档位跳变）。
+    // 等效温度 = 实际温度 + 前馈 + 高 SOC 收紧，见下。
+    double effT = _lastTempC;
+    // 前馈：快速升温时提前介入（dT/dt × 前瞻时间，上限 jy_dt_max_advance_c）。
+    if (self.tempTrendCPerS > 0) {
+        double adv = self.tempTrendCPerS * getLocalInt(@"jy_dt_lookahead_s", 30);
+        double maxAdv = getLocalInt(@"jy_dt_max_advance_c", 2);
+        if (adv > maxAdv) adv = maxAdv;
+        effT += adv;
+    }
+    // 高 SOC 收紧：> jy_high_soc 时等效温度 +2℃（阈值等效下调 2℃）。
+    if (self.lastSoc > getLocalInt(@"jy_high_soc", 88)) effT += 2.0;
+    // 前馈不越界到紧急区（紧急归 emergencyHandler，PWM 只负责到 duty_floor）。
+    double emergBound = getLocalInt(@"jy_emergency", 39);
+    if (effT > emergBound - 0.5) effT = emergBound - 0.5;
+
+    float target = CLDutyTarget(effT);
+    // 低温限流：< jy_cold_throttle_c 时占空比上限 50%（低温大倍率充电有锂镀层风险）。
+    if (_lastTempC < getLocalInt(@"jy_cold_throttle_c", 5) && target > 0.5f) target = 0.5f;
+    // 时间低通：占空比向目标平滑滑移（时间常数 jy_pwm_smooth_tau，默认 90s），
+    // 既"随温度连续"又"随时间柔和"，杜绝单样本温度抖动导致占空比骤变。
         double now = CLContinuousSeconds();
         if (!_hasDutyTs) {
             _smoothDuty = target;
