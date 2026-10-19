@@ -5437,6 +5437,7 @@ NSDictionary* handleReq(NSDictionary* nsreq) {
             kv[@"jy_gov_temp"] = govState[@"temp_c"] ?: @0;
             kv[@"jy_gov_amp"] = govState[@"amp_ma"] ?: @0;
             kv[@"jy_gov_charging"] = govState[@"charging"] ?: @NO;
+            kv[@"jy_gov_duty"] = govState[@"pwm_duty"] ?: @1;   // 供曲线图读取真实占空比
             // P2 剩余充电时间（只读估算）：分钟数 + 状态 + 置信度。
             kv[@"jy_eta_min"] = @(g_etaMinutes);
             kv[@"jy_eta_state"] = g_etaState ?: @"unplugged";
@@ -5567,7 +5568,13 @@ NSDictionary* handleReq(NSDictionary* nsreq) {
         } else if ([key isEqualToString:@"charge_above"]) {
             resetHoldSessionState();
             refreshHoldMonitorTimer();
-            if ([val intValue] >= 100) {
+            int target = [val intValue];
+            int soc = [bat_info[@"CurrentCapacity"] isKindOfClass:[NSNumber class]]
+                          ? [bat_info[@"CurrentCapacity"] intValue] : -1;
+            // 上限被抬高到当前电量之上 → 立即释放容量停充。
+            // 否则会卡在 charge_below~charge_above 的"保持带"里：既不到停充线、
+            // 也到不了恢复线，表现为"把最大充电调高后反而不充了"（真机 2026-10-20）。
+            if (target >= 100 || (soc >= 0 && soc < target)) {
                 resetBatteryStatus();
             }
         } else if ([@[

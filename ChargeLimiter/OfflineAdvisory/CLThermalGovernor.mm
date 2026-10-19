@@ -222,10 +222,11 @@ static double CLContinuousSeconds(void) {
     NSInteger soc = [bat_info[@"CurrentCapacity"] integerValue];
     if (bat_info[@"CurrentCapacity"] != nil) {
         NSInteger maxPct = getLocalInt(@"jy_max_percent", 80);
-        NSInteger resumePct = getLocalInt(@"jy_resume_percent", 75);
         if (soc >= maxPct) {
             [self setCapacityLatched:YES];
-        } else if (soc <= resumePct) {
+        } else {
+            // 低于上限（含"用户抬高上限"的情况）→ 立即解除，PWM 恢复工作。
+            // 不再用 resume 阈值滞回：那会让 latch 在 76~max 的保持带里卡住。
             [self setCapacityLatched:NO];
         }
     }

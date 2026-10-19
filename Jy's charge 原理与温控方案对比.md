@@ -306,3 +306,86 @@ T_low ~ T_max 之间 → 不干预（满速）
 | `ChargeLimiter/UIKit/CLButlerViewController.m`       | 主界面（温度/档位/滑块/日志/天数/版本/电流功率）            |
 | `ChargeLimiter/Tweak/CLThermalSimTweak.m`            | 热模拟执行端（RootHide 下不被注入，保留作 Dopamine 备选） |
 | `软PWM与温控开关对比.md`                                     | 早期对比草稿（本文档为其完整扩展）                      |
+
+---
+
+## 11. 版本演进与故障复盘（1.0.20 → 1.0.36）
+
+> 这一节是实战记录。每一条都对应一次真机现象、根因和修复，避免后人重踩。
+
+### 11.1 功能演进
+
+| 版本 | 变更 |
+|---|---|
+| 1.0.20 | 软 PWM 柔性充电落地：按占空比软停/恢复 |
+| 1.0.21 | 删除无效的 tweak 日志段；天数计数改纯数字右对齐 |
+| 1.0.22 | PWM 按秒切片（周期 60s→20s），更接近连续调流 |
+| 1.0.23 | 修复容量 latch 只能置位不能清除（`resume-review` 永不可达） |
+| 1.0.24 | 修复 `[NSDate timeIntervalSince1970]` 类方法误用 |
+| 1.0.25 | P0：启动释放残留 `PredictiveChargingInhibit` |
+| 1.0.26 | P0：紧急停充闭环校验（8s 后回读电流） |
+| 1.0.27 | P1：温度连续插值占空比 + 时间低通（90s） |
+| 1.0.28 | P1：dT/dt 前馈 + 高 SOC 收紧 + 低温限流 |
+| 1.0.29 | P2：剩余充电时间估算（ETA） |
+| 1.0.30 | 修复 `updateChargeETA` 前向声明缺失 |
+| 1.0.31 | 修复 `getIOPMPSServ` 缓存句柄失效导致 bat_info 冻结 |
+| 1.0.32 | 修复共享句柄被误释放 → daemon 崩溃循环 |
+| 1.0.33 | UI：防重叠 + 写入失败回滚开关状态 |
+| 1.0.34 | 修复温控关闭时 PWM 仍在限流 |
+| 1.0.35 | ETA 改电流×占空比速率；短暂停相位不再闪「暂停」 |
+| 1.0.36 | 修复抬高最大充电后卡在容量保持带、不恢复充电 |
+
+### 11.2 四个必须记住的坑
+
+**① 缓存 IOKit 句柄必须能失效重枚举**
+`getIOPMPSServ()` 曾用函数内 static 缓存 `io_service_t`。安装/注销后服务重枚举，句柄失效，`getBatInfo` 每次返回 nil → `bat_info` 永久冻结 → 温控与 UI 全部失联。
+修复：文件级 static + `invalidateIOPMPSServCache()` + 失败重枚举重试 + `g_lastBatInfoOkTs` 新鲜度看门狗。
+
+**② 共享句柄的所有权契约（borrowed vs owned）**
+`getIOPMPSServ()` 返回的是**借用引用**。任何调用方 `IOObjectRelease` 都会把引用计数打到 0；再叠加"失效重试"的 release 就变成 **over-release → daemon 崩溃循环 → HTTP 连接错误 / 日志闪白 / UI 卡死**。
+铁律：**借用引用绝不 release**；只有 `IOServiceGetMatchingService` / `*Copy*` 这类 +1 引用才 release。
+
+**③ 容量控制是滞回，存在"保持带"**
+停充线 `charge_above`、恢复线 `charge_below`。`charge_below < SOC < charge_above` 时既不满足停充也不满足恢复 → 保持上一条状态。
+所以"把上限从 80 调到 81"会卡住不充。修复：`charge_above` 被设到当前 SOC 之上时立即 `resetBatteryStatus()`。
+
+**④ 连续占空比必须显式尊重总开关**
+改成 `duty(T)` 直接吃温度后，绕过了档位，导致 `jy_thermal_enabled=0` 时仍在限流。`pwmDuty` 开头必须先判总开关。
+
+### 11.3 当前控制链（1.0.36 最终形态）
+
+```
+采样（电池事件 + 15s 心跳）
+  → getBatInfo（共享服务句柄，失败自动重枚举）
+  → CLOfflineAdvisory（温度分级 + 滞回 + min_hold / 容量滞回）
+  → CLThermalGovernor
+       level        → 档位展示
+       emergency    → 39℃ 停充 latch（回落 3℃ 解除）
+       pwmDuty      = 连续 duty(T) [+dT/dt 前馈 +高SOC收紧]
+                       + 时间低通(90s)
+                       + 硬门控：温控关闭 / 未接电源 / 容量到顶 / 紧急
+  → applyChargePolicy（容量/紧急优先，PWM 让位）
+  → CLThermalPwmTick（2s，时间切片相位，软停/恢复）
+  → IOKit PredictiveChargingInhibit
+```
+
+---
+
+## 12. 验收清单（安装 1.0.36 后逐项确认）
+
+| # | 操作 | 预期 |
+|---|---|---|
+| 1 | 打开 App | 温度/电量/电流实时跳动，不再卡在某个旧值 |
+| 2 | 插拔充电器 | 「未接电源」↔「充电中」立即切换 |
+| 3 | 保存任意设置 | 不再出现「保存失败：连接错误」 |
+| 4 | 打开「温控充电」 | 开关保持常绿；关掉后 `[pwm]` 日志停止出现 |
+| 5 | 充电到 32–36℃ | `[pwm] duty=` 连续渐变（如 96→88→75%），温度小幅波动 |
+| 6 | 温度 ≥39℃ | `[act=3]` 紧急停充，电流归零；降到 36℃ 恢复 |
+| 7 | 电量到 80% | 停充，界面显示「已满」 |
+| 8 | 把最大充电从 80% 调到 81% | **立即恢复充电**（`cap=0`，amp 变正） |
+| 9 | 再调回 80% | 立即停充 |
+| 10 | 充电中观察 ETA | 79% 附近应为 5–10 分钟；PWM 停充相位不闪「暂停」 |
+| 11 | 界面文字 | 电量/电流/功率/ETA 不压到「电池温度」 |
+| 12 | 底部 | 显示 `Jy's charge v1.0.36` |
+
+> 任一项不通过：展开日志，找 `[pwm]` / `[warn]` / `[channel]` 行，附带当时温度、电量、电流一起反馈。

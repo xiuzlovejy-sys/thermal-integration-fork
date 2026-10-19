@@ -71,6 +71,75 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
 
 @end
 
+#pragma mark - 近 30 分钟曲线
+
+// 三条归一化曲线叠加：温度（橙，20–45℃）、充电电流（青，0–3000mA）、占空比（琥珀，0–1）。
+// 只读展示，不参与任何控制。
+@interface CLCurveView : UIView
+@property (nonatomic, strong) NSArray<NSDictionary *> *samples;   // @{t,temp,amp,duty}
+@end
+
+@implementation CLCurveView
+
+- (void)setSamples:(NSArray<NSDictionary *> *)samples {
+    _samples = [samples copy];
+    [self setNeedsDisplay];
+}
+
+- (void)drawLineInContext:(CGContextRef)ctx key:(NSString *)key
+                      min:(double)mn max:(double)mx color:(UIColor *)color
+                        w:(CGFloat)w h:(CGFloat)h {
+    NSArray *arr = self.samples;
+    NSUInteger n = arr.count;
+    if (n < 2 || mx <= mn) return;
+    CGContextSetStrokeColorWithColor(ctx, color.CGColor);
+    CGContextSetLineWidth(ctx, 1.6);
+    CGContextSetLineJoin(ctx, kCGLineJoinRound);
+    BOOL started = NO;
+    for (NSUInteger i = 0; i < n; i++) {
+        id vObj = arr[i][key];
+        if (vObj == nil) continue;
+        double v = [vObj doubleValue];
+        double r = (v - mn) / (mx - mn);
+        if (r < 0) r = 0; if (r > 1) r = 1;
+        CGFloat x = (n <= 1) ? 0 : (w * (CGFloat)i / (CGFloat)(n - 1));
+        CGFloat y = h * (1.0 - (CGFloat)r);
+        if (!started) { CGContextMoveToPoint(ctx, x, y); started = YES; }
+        else { CGContextAddLineToPoint(ctx, x, y); }
+    }
+    if (started) CGContextStrokePath(ctx);
+}
+
+- (void)drawRect:(CGRect)rect {
+    CGContextRef ctx = UIGraphicsGetCurrentContext();
+    if (!ctx) return;
+    CGFloat w = CGRectGetWidth(rect), h = CGRectGetHeight(rect);
+    if (w <= 0 || h <= 0) return;
+
+    // 网格（4 条横线）
+    CGContextSetStrokeColorWithColor(ctx, [UIColor colorWithWhite:1.0 alpha:0.07].CGColor);
+    CGContextSetLineWidth(ctx, 0.5);
+    for (int i = 0; i <= 3; i++) {
+        CGFloat y = h * (CGFloat)i / 3.0;
+        CGContextMoveToPoint(ctx, 0, y);
+        CGContextAddLineToPoint(ctx, w, y);
+    }
+    CGContextStrokePath(ctx);
+
+    if (self.samples.count < 2) {
+        NSDictionary *attrs = @{NSFontAttributeName: [UIFont systemFontOfSize:11],
+                                NSForegroundColorAttributeName: [UIColor colorWithWhite:0.45 alpha:1.0]};
+        [@"等待采样…（约 1 分钟出现曲线）" drawAtPoint:CGPointMake(8, h / 2 - 7) withAttributes:attrs];
+        return;
+    }
+
+    [self drawLineInContext:ctx key:@"temp" min:20 max:45 color:CLColorOrange() w:w h:h];
+    [self drawLineInContext:ctx key:@"duty" min:0 max:1 color:CLColorAmber() w:w h:h];
+    [self drawLineInContext:ctx key:@"amp" min:0 max:3000 color:CLColorTeal() w:w h:h];
+}
+
+@end
+
 #pragma mark - 主控制器
 
 @interface CLButlerViewController ()
@@ -113,6 +182,10 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
 @property (nonatomic, strong) UILabel *dayCountLabel;
 // 底部版本号
 @property (nonatomic, strong) UILabel *versionLabel;
+// 近 30 分钟曲线（App 侧采样，不碰 daemon）
+@property (nonatomic, strong) CLCurveView *curveView;
+@property (nonatomic, strong) NSMutableArray<NSDictionary *> *curveSamples;
+@property (nonatomic, assign) NSTimeInterval curveLastSampleTs;
 
 // 显式声明（避免"方法定义在使用之后"的实例方法解析差异，编译更稳）
 - (void)refresh;
@@ -138,6 +211,7 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
 - (void)restartThermald;
 - (void)probeHW;
 - (void)updateDayCount;
+- (void)sampleCurveIfNeeded;
 
 @end
 
@@ -420,6 +494,43 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
         [self.startDetailLabel.bottomAnchor constraintEqualToAnchor:startCard.bottomAnchor constant:-18],
     ]];
 
+    // ---- 充电曲线（近 30 分钟，App 侧采样；只读展示）----
+    UIView *curveCard = [self card];
+    [stack addArrangedSubview:curveCard];
+
+    UILabel *cvTitle = [self label:@"充电曲线" size:13 weight:UIFontWeightSemibold color:CLColorText()];
+    UILabel *cvRange = [self label:@"近 30 分钟" size:11 weight:UIFontWeightRegular color:CLColorSub()];
+    self.curveView = [[CLCurveView alloc] init];
+    self.curveView.translatesAutoresizingMaskIntoConstraints = NO;
+    self.curveView.backgroundColor = [UIColor clearColor];
+    self.curveView.samples = @[];
+
+    UILabel *lgTemp = [self label:@"● 温度" size:10 weight:UIFontWeightRegular color:CLColorOrange()];
+    UILabel *lgAmp  = [self label:@"● 电流" size:10 weight:UIFontWeightRegular color:CLColorTeal()];
+    UILabel *lgDuty = [self label:@"● 占空比" size:10 weight:UIFontWeightRegular color:CLColorAmber()];
+    UIStackView *legend = [[UIStackView alloc] initWithArrangedSubviews:@[lgTemp, lgAmp, lgDuty]];
+    legend.axis = UILayoutConstraintAxisHorizontal;
+    legend.spacing = 12;
+    legend.translatesAutoresizingMaskIntoConstraints = NO;
+
+    [curveCard addSubview:cvTitle];
+    [curveCard addSubview:cvRange];
+    [curveCard addSubview:self.curveView];
+    [curveCard addSubview:legend];
+    [NSLayoutConstraint activateConstraints:@[
+        [cvTitle.topAnchor constraintEqualToAnchor:curveCard.topAnchor constant:18],
+        [cvTitle.leadingAnchor constraintEqualToAnchor:curveCard.leadingAnchor constant:20],
+        [cvRange.centerYAnchor constraintEqualToAnchor:cvTitle.centerYAnchor],
+        [cvRange.trailingAnchor constraintEqualToAnchor:curveCard.trailingAnchor constant:-20],
+        [self.curveView.topAnchor constraintEqualToAnchor:cvTitle.bottomAnchor constant:12],
+        [self.curveView.leadingAnchor constraintEqualToAnchor:curveCard.leadingAnchor constant:20],
+        [self.curveView.trailingAnchor constraintEqualToAnchor:curveCard.trailingAnchor constant:-20],
+        [self.curveView.heightAnchor constraintEqualToConstant:110],
+        [legend.topAnchor constraintEqualToAnchor:self.curveView.bottomAnchor constant:10],
+        [legend.leadingAnchor constraintEqualToAnchor:curveCard.leadingAnchor constant:20],
+        [legend.bottomAnchor constraintEqualToAnchor:curveCard.bottomAnchor constant:-16],
+    ]];
+
     // ---- 运行日志（默认折叠；排障时展开）----
     UIView *logCard = [self card];
     [stack addArrangedSubview:logCard];
@@ -541,6 +652,7 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
         if (data) {
             weakSelf.batInfo = data;
             [weakSelf renderBattery];
+            [weakSelf sampleCurveIfNeeded];
         }
     }];
     [[CLAPIClient shared] getConfigWithKey:nil completion:^(NSDictionary *response, NSError *error) {
@@ -568,6 +680,24 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
 - (NSString *)stringFromConf:(NSString *)key fallback:(NSString *)fallback {
     id v = self.conf[key];
     return [v isKindOfClass:[NSString class]] ? v : fallback;
+}
+
+// 曲线采样：每 5 秒一点，保留 30 分钟（360 点）。只在 App 内存里存，不写盘、不碰 daemon。
+- (void)sampleCurveIfNeeded {
+    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+    if (self.curveLastSampleTs > 0 && (now - self.curveLastSampleTs) < 5.0) return;
+    self.curveLastSampleTs = now;
+    if (self.curveSamples == nil) self.curveSamples = [NSMutableArray array];
+
+    double temp = [self.batInfo[@"Temperature"] doubleValue] / 100.0;
+    long long amp = [self.batInfo[@"Amperage"] longLongValue];
+    if (amp < 0) amp = -amp;
+    id dutyObj = self.conf[@"jy_gov_duty"];
+    float duty = [dutyObj respondsToSelector:@selector(floatValue)] ? [dutyObj floatValue] : 1.0f;
+
+    [self.curveSamples addObject:@{@"t": @(now), @"temp": @(temp), @"amp": @(amp), @"duty": @(duty)}];
+    while (self.curveSamples.count > 360) [self.curveSamples removeObjectAtIndex:0];
+    self.curveView.samples = self.curveSamples;
 }
 
 - (void)renderBattery {
