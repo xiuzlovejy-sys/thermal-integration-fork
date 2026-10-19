@@ -131,7 +131,6 @@ static NSTimer* g_jyThermalEvalTimer = nil;
 // 软 PWM 柔性充电（RootHide 注入无关）：按 governor.pwmDuty 周期性软停/恢复，
 // 复用 g_jyThermalEmergencyStop + setChargeStatus 这条已验证的受控布尔通道。
 static NSTimer* g_jyPwmTimer = nil;
-static int g_jyPwmCounter = 0;
 // Jy's charge 温控紧急停充（governor 44℃ 兜底）：
 // applyChargePolicy 的最高优先级分支读它——避免状态机下一轮把停充重新放开
 // （否则 governor 与策略机每轮互相覆盖）。清除后策略机自然恢复。
@@ -4810,7 +4809,6 @@ static void CLThermalPwmTick(void) {
     if (!g_enable) return;
     CLThermalGovernor* governor = [CLThermalGovernor sharedGovernor];
     float duty = [governor pwmDuty];
-    g_jyPwmCounter++;
     BOOL stop;
     if (duty <= 0.01f) {
         return;   // 紧急/重度：emergencyHandler 已停充，PWM 不干预
@@ -4818,9 +4816,12 @@ static void CLThermalPwmTick(void) {
     if (duty >= 0.99f) {
         stop = NO;
     } else {
-        int periodTicks = MAX(2, getLocalInt(@"jy_pwm_period_s", 60) / 5);
-        int onTicks = (int)lroundf(duty * periodTicks);
-        stop = (g_jyPwmCounter % periodTicks) >= onTicks;
+        // 时间切片（精确到秒，不用 tick 量化）：周期越短电流波动越密、越接近连续调流。
+        int period = MAX(10, getLocalInt(@"jy_pwm_period_s", 20));
+        int onSeconds = (int)lroundf(duty * period);
+        long long secs = (long long)[NSDate timeIntervalSinceReferenceDate];
+        int phase = (int)(secs % period);
+        stop = (phase >= onSeconds);
     }
     if (stop != g_jyThermalEmergencyStop) {
         g_jyThermalEmergencyStop = stop;
@@ -5431,23 +5432,14 @@ NSDictionary* handleReq(NSDictionary* nsreq) {
             @"status": @0,
         };
     } else if ([api isEqualToString:@"jy_log"]) {
-        // 运行日志（App 排障面板）：daemon 决策日志 + tweak 执行日志。
-        // 两段分开是刻意的——"决策输出正确但执行端没接上"必须一眼可辨。
+        // 运行日志：只展示 governor/daemon 决策日志。
+        // tweak 执行日志（jys-tweak.log）已移除——RootHide 下 thermalmonitord 不注入，
+        // 该段永远是无用噪音（2026-10-19 用户要求删除）。
         NSString *path = [CLThermalGovernor logPath];
         NSString *text = [CLThermalGovernor logTailWithMaxLines:200];
-        NSString *tweakPath = @"/var/mobile/Library/Logs/JysCharge/jys-tweak.log";
-        NSString *tweak = [NSString stringWithContentsOfFile:tweakPath
-                                                    encoding:NSUTF8StringEncoding
-                                                       error:NULL];
-        if (tweak.length > 3000) {
-            tweak = [tweak substringFromIndex:tweak.length - 3000];
-        }
-        NSString *combined = [NSString stringWithFormat:
-            @"=== daemon 决策 ===\n%@\n\n=== tweak 执行 ===\n%@",
-            text ?: @"", tweak.length ? tweak : @"（无记录：tweak 未注入 thermalmonitord）"];
         NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:path error:NULL];
         return @{@"status": @0,
-                 @"data": @{@"text": combined,
+                 @"data": @{@"text": text ?: @"",
                             @"size": attrs[NSFileSize] ?: @0,
                             @"path": path ?: @""}};
     } else if ([api isEqualToString:@"jy_hw"]) {
@@ -6429,10 +6421,10 @@ int main(int argc, char** argv) { // daemon_main
                     refreshBatteryStateAndApplyPolicy();
                 }];
             }
-            // 软 PWM 柔性充电：5 秒一个相位步进（占空比按 jy_pwm_period_s 折算）。
+            // 软 PWM 柔性充电：每 2 秒重估相位（按时间切片，周期 jy_pwm_period_s 默认 20s）。
             // 注入无关，复用已验证的 setChargeStatus 受控通道。
             if (g_jyPwmTimer == nil) {
-                g_jyPwmTimer = [NSTimer scheduledTimerWithTimeInterval:5.0
+                g_jyPwmTimer = [NSTimer scheduledTimerWithTimeInterval:2.0
                                                                repeats:YES
                                                                  block:^(NSTimer* timer) {
                     CLThermalPwmTick();

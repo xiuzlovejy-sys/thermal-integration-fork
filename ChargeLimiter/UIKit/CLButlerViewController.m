@@ -248,6 +248,7 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
     UILabel *title = [self label:@"Jy's charge" size:20 weight:UIFontWeightSemibold color:CLColorText()];
     UILabel *subtitle = [self label:@"智能温控充电" size:12 weight:UIFontWeightRegular color:CLColorSub()];
     self.dayCountLabel = [self label:@"" size:12 weight:UIFontWeightMedium color:CLColorTeal()];
+    self.dayCountLabel.textAlignment = NSTextAlignmentRight;
     [self updateDayCount];
     UIStackView *titleStack = [[UIStackView alloc] initWithArrangedSubviews:@[title, subtitle, self.dayCountLabel]];
     titleStack.axis = UILayoutConstraintAxisVertical;
@@ -607,7 +608,7 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
     NSDate *refDay = [cal startOfDayForDate:ref];
     NSDate *nowDay = [cal startOfDayForDate:now];
     NSInteger days = [cal components:NSCalendarUnitDay fromDate:refDay toDate:nowDay options:0].day;
-    self.dayCountLabel.text = [NSString stringWithFormat:@"自 2009.04.18 已 %ld 天", (long)days];
+    self.dayCountLabel.text = [NSString stringWithFormat:@"%ld", (long)days];
 }
 
 - (void)renderLevel {
