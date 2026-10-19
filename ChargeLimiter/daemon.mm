@@ -236,6 +236,7 @@ static void updateStatistics(void);
 static void evaluateFullChargeSchedule(BOOL forceApply);
 static void refreshBatteryStateAndApplyPolicy(void);
 static void clObserveOfflineAdvisory(NSDictionary* bat_info);
+static void updateChargeETA(void);   // P2 剩余充电时间（只读）
 static void applyChargePolicy(NSDictionary* oldInfo, NSDictionary* info);
 static BOOL historyStatsEnabled(void);
 static BOOL hasPotentialExternalPowerSignal(NSDictionary* info);
