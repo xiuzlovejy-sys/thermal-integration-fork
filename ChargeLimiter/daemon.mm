@@ -5386,7 +5386,9 @@ NSDictionary* handleReq(NSDictionary* nsreq) {
         // 诊断用：重启 thermalmonitord 换入新 dylib。首选 killall（Powercuff/CPUthermal
         // 同款重载），jbroot 下 killall 能正确看见真实 rootfs 的 thermalmonitord；
         // get_pid_of(KERN_PROC) 在某些 jbroot 命名空间看不到它。
-        int rc = system("/usr/bin/killall -9 thermalmonitord 2>/dev/null");
+        pid_t child = 0;
+        int rc = spawn(@[@"killall", @"-9", @"thermalmonitord"], nil, nil, &child,
+                       SPAWN_FLAG_NOWAIT, nil);
         if (rc == 0) {
             return @{@"status": @0, @"data": @{@"method": @"killall"}};
         }
