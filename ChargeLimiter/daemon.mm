@@ -131,8 +131,11 @@ static NSTimer* g_jyThermalEvalTimer = nil;
 // 软 PWM 柔性充电（RootHide 注入无关）：按 governor.pwmDuty 周期性软停/恢复，
 // 复用 g_jyThermalEmergencyStop + setChargeStatus 这条已验证的受控布尔通道。
 static NSTimer* g_jyPwmTimer = nil;
-// P2 剩余充电时间估算（只读，不干预控制）：滑动窗口 (time, RawCapacity) 样本。
-static NSMutableArray* g_etaSamples = nil;
+static float g_jyLastDuty = 1.0f;   // PWM tick 最近一次占空比（供 ETA 用，避免重复调用有副作用的 pwmDuty）
+// P2 剩余充电时间估算（只读，不干预控制）：滑动窗口采样。
+static NSMutableArray* g_etaSamples = nil;    // @[ @{t, mah} ] 容量窗口（保留作交叉校验）
+static NSMutableArray* g_etaAmpSamples = nil;  // 充电相电流样本（mA）
+static NSTimeInterval g_etaLastChargingTs = 0; // 最近一次"确实在充"的时间
 static NSString* g_etaState = @"unplugged";   // unplugged/paused/charging/at_target/estimating/no_data
 static NSInteger g_etaMinutes = -1;           // -1 = 无有效估算
 static NSString* g_etaConfidence = @"low";
@@ -4895,8 +4898,11 @@ static void updateChargeETA(void) {
 
     if (!external || rawCurObj == nil || rawMaxObj == nil) {
         if (g_etaSamples == nil) g_etaSamples = [NSMutableArray array];
+        if (g_etaAmpSamples == nil) g_etaAmpSamples = [NSMutableArray array];
         [g_etaSamples removeAllObjects];
+        [g_etaAmpSamples removeAllObjects];
         g_etaMinutes = -1;
+        g_etaLastChargingTs = 0;
         g_etaState = !external ? @"unplugged" : @"no_data";
         return;
     }
@@ -4910,46 +4916,46 @@ static void updateChargeETA(void) {
     // 已达目标电量
     if (remainMah <= 0) { g_etaMinutes = 0; g_etaState = @"at_target"; g_etaConfidence = @"high"; return; }
 
-    // 未在充电（软 PWM 停充相位 / 紧急停充 / 容量停充）→ 暂停计时，不采样
+    NSTimeInterval nowTs = [[NSDate date] timeIntervalSince1970];
+
+    // 未在充电（软 PWM 停充相位 / 紧急停充 / 容量停充）：
+    // 只有"持续 >15s 不在充"才显示暂停；PWM 的 10s 级停充相位不打断 ETA，避免界面闪烁。
     if (!charging || amp <= 100) {
+        if (g_etaLastChargingTs > 0 && (nowTs - g_etaLastChargingTs) < 15.0 && g_etaMinutes > 0) {
+            return;   // 短暂停相位：保留上一次估算
+        }
         g_etaMinutes = -1;
         g_etaState = @"paused";
         return;
     }
 
-    // 采样：仅充电相位
-    if (g_etaSamples == nil) g_etaSamples = [NSMutableArray array];
-    NSTimeInterval t = [[NSDate date] timeIntervalSince1970];
-    [g_etaSamples addObject:@{@"t": @(t), @"mah": @(rawCur)}];
-    while (g_etaSamples.count > 2 && (t - [g_etaSamples[0][@"t"] doubleValue]) > 600.0) {
-        [g_etaSamples removeObjectAtIndex:0];   // 保留最近 10 分钟
-    }
+    g_etaLastChargingTs = nowTs;
 
-    double rateMahPerMin = 0;
-    double windowMin = 0;
-    NSUInteger n = g_etaSamples.count;
-    if (n >= 2) {
-        double t0 = [g_etaSamples[0][@"t"] doubleValue];
-        double t1 = [g_etaSamples[n-1][@"t"] doubleValue];
-        double m0 = [g_etaSamples[0][@"mah"] doubleValue];
-        double m1 = [g_etaSamples[n-1][@"mah"] doubleValue];
-        windowMin = (t1 - t0) / 60.0;
-        if (windowMin > 0) rateMahPerMin = (m1 - m0) / windowMin;
-    }
+    // 采样：充电相电流（mA）。速率直接用 电流 × 占空比 计算——
+    // 比"Raw 容量差"可靠得多：容量表在 80% 附近按 1% 阶梯缓慢更新，
+    // 用容量差会把速率严重低估（真机 79%→80% 曾误报 24 分钟）。
+    if (g_etaAmpSamples == nil) g_etaAmpSamples = [NSMutableArray array];
+    [g_etaAmpSamples addObject:@(amp)];
+    while (g_etaAmpSamples.count > 24) [g_etaAmpSamples removeObjectAtIndex:0];   // 约 6 分钟（15s/次）
 
-    if (rateMahPerMin <= 0.5) {
+    double ampSum = 0;
+    for (NSNumber *v in g_etaAmpSamples) ampSum += [v doubleValue];
+    double avgAmp = g_etaAmpSamples.count ? ampSum / (double)g_etaAmpSamples.count : 0;
+
+    // 有效平均速率（mAh/min）= 充电相电流(mA) × 占空比 ÷ 60
+    float duty = (g_jyLastDuty > 0.02f && g_jyLastDuty <= 1.0f) ? g_jyLastDuty : 1.0f;
+    double rateMahPerMin = (avgAmp * (double)duty) / 60.0;
+
+    if (rateMahPerMin <= 0.3) {
         g_etaMinutes = -1;
-        g_etaState = @"estimating";   // 样本不足 / 窗口太短
+        g_etaState = @"estimating";
         g_etaConfidence = @"low";
         return;
     }
 
     g_etaMinutes = (NSInteger)lround(remainMah / rateMahPerMin);
-    if (socPct > 80 || g_etaSamples.count < 6 || windowMin < 2.0) {
-        g_etaConfidence = @"medium";   // 高 SOC taper / 样本少 → 降置信度
-    } else {
-        g_etaConfidence = @"high";
-    }
+    // 高 SOC 段电流会继续 taper，ETA 天然偏低；降置信度提示。
+    g_etaConfidence = (socPct > 80 || g_etaAmpSamples.count < 4) ? @"medium" : @"high";
     g_etaState = @"charging";
 }
 
@@ -4998,6 +5004,7 @@ static void CLThermalPwmTick(void) {
     }
     CLThermalGovernor* governor = [CLThermalGovernor sharedGovernor];
     float duty = [governor pwmDuty];
+    g_jyLastDuty = duty;   // 供 ETA 使用（电流 × 占空比 = 有效平均速率）
     BOOL stop;
     if (duty <= 0.01f) {
         return;   // 紧急/重度：emergencyHandler 已停充，PWM 不干预
