@@ -5384,11 +5384,17 @@ NSDictionary* handleReq(NSDictionary* nsreq) {
         return @{@"status": @0, @"data": @{}};
     } else if ([api isEqualToString:@"jy_restart_thermald"]) {
         // 诊断用：强制重启 thermalmonitord，让新装的注入 dylib 在进程启动时被加载。
-        // launchd 会立即重新拉起它；SIGKILL 一瞬热管理中断，随后恢复监控。
+        // 注意必须检查 kill() 返回值——RootHide 隔离下 jbroot 进程可能无权
+        // 杀真实 rootfs 的系统进程（EPERM），不检查就会误报"已重启"。
         int pid = get_pid_of("thermalmonitord");
         if (pid > 1) {
-            kill(pid, SIGKILL);
-            return @{@"status": @0, @"data": @{@"killed_pid": @(pid)}};
+            if (kill(pid, SIGKILL) == 0) {
+                return @{@"status": @0, @"data": @{@"killed_pid": @(pid)}};
+            }
+            return @{@"status": @(-2),
+                     @"data": @{@"error": @"kill failed (EPERM?)",
+                                @"pid": @(pid),
+                                @"errno": @(*__error())}};
         }
         return @{@"status": @(-1), @"data": @{@"error": @"thermalmonitord not found"}};
     } else if ([api isEqualToString:@"get_bat_info"]) {

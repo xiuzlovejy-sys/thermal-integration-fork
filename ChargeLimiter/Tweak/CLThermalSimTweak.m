@@ -385,8 +385,13 @@ __attribute__((constructor)) static void CLTSInit(void) {
     @autoreleasepool {
         Class productClass = objc_getClass("CommonProduct");
         NSLog(@"[CLThermalSim] ctor loaded productClass=%@", productClass != nil ? @"yes" : @"no");
-        CLTSLog(@"[ctor] loaded, CommonProduct=%@", productClass != nil ? @"yes" : @"no");
-        // 16.6 缺 CommonProduct：枚举类找替代 API（只探一次）。
+        // 记录进程名 + pid：之前"CommonProduct=no"到底来自 thermalmonitord 还是
+        // SpringBoard 一直没证据，导致方向无法判定。从此每条都带进程身份。
+        CLTSLog(@"[ctor] proc=%@ pid=%d CommonProduct=%@",
+                [NSProcessInfo processInfo].processName ?: @"?",
+                getpid(),
+                productClass != nil ? @"yes" : @"no");
+        // 16.6 缺 CommonProduct：枚举类找替代 API（只探一次，且仅在 thermalmonitord）。
         if (productClass == nil) CLTSProbeClasses();
         if (productClass != nil) { // 类缺失（系统变更）：静默退回
             CLTSHookSelector(productClass, @selector(initProduct:), (IMP)CLTSInitProductOverride, &CLTSOrigInitProduct);
