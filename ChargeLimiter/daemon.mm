@@ -4911,9 +4911,9 @@ static void CLThermalPwmTick(void) {
         f.dateFormat = @"MM-dd HH:mm:ss";
         NSString *ts = [f stringFromDate:[NSDate date]];
         [CLThermalGovernor appendLogLine:[NSString stringWithFormat:
-            @"%@ [pwm] duty=%.0f%% -> %@", ts, duty * 100.0f,
+            @"%@ [pwm] duty=%.1f%% -> %@", ts, duty * 100.0f,
             stop ? @"STOP" : @"CHARGE"]];
-        NSLog(@"[Jy] soft-PWM duty=%.0f%% -> %@", duty * 100.0f, stop ? @"STOP" : @"CHARGE");
+        NSLog(@"[Jy] soft-PWM duty=%.1f%% -> %@", duty * 100.0f, stop ? @"STOP" : @"CHARGE");
     }
 }
 

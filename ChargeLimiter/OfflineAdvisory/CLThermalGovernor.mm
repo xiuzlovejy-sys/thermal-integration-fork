@@ -6,6 +6,7 @@
 #import "thermal_policy.h"
 #import <notify.h>
 #import <mach/mach_time.h>
+#include <math.h>
 
 // 设置读取（utils.mm 定义，daemon target 内）。此处只前置声明，避免把 utils.h /
 // common.h 整包拉进决策引擎——头文件污染越小，接线越不容易撬动既有编译单元。
@@ -31,6 +32,9 @@ static NSString *const CLGovernorApplyNotification = @"com.jy.charge.thermalappl
 @property (nonatomic) long long lastAmpMa;         // 最近一次实测电流（原始符号）
 @property (nonatomic) BOOL lastCharging;
 @property (nonatomic) BOOL adapterConnected;        // 最近一次事件是否已接电源（不受停充影响）
+@property (nonatomic) float smoothDuty;             // 平滑后占空比（P1 时间低通）
+@property (nonatomic) double lastDutyTs;            // 上次平滑时间
+@property (nonatomic) BOOL hasDutyTs;
 @property (nonatomic) CLOfflineAdvisory *advisory;   // 跨轮复用：tp_policy 状态在实例内
 // 日志节流：档位/动作变化必记，其余每 30 秒一条心跳。
 @property (nonatomic) NSInteger loggedLevel;
@@ -341,18 +345,61 @@ static NSString *CLTimestamp(void) {
     };
 }
 
+// 连续占空比目标：温度 → 占空比，档位内线性插值，档位边界处连续（无跳变）。
+//   ≤ rise_light:                    1.0（满速）
+//   rise_light → rise_moderate:      1.0 → moderate_duty（轻度过渡带）
+//   rise_moderate → emergency:       moderate_duty → duty_floor（中度带）
+//   ≥ emergency:                     0（由紧急 latch 处理，PWM 不参与）
+static float CLDutyTargetForTemp(double T) {
+    double riseLight = getLocalInt(@"jy_rise_light", 30);
+    double riseMod   = getLocalInt(@"jy_rise_moderate", 34);
+    double emerg     = getLocalInt(@"jy_emergency", 39);
+    double dutyMod   = getLocalInt(@"jy_pwm_moderate_duty", 55) / 100.0;
+    double dutyFloor = getLocalInt(@"jy_pwm_duty_floor", 20) / 100.0;
+    if (T >= emerg) return 0.0f;
+    if (T <= riseLight) return 1.0f;
+    if (T <= riseMod) {
+        double span = (riseMod - riseLight) > 0.1 ? (riseMod - riseLight) : 0.1;
+        double r = (T - riseLight) / span;
+        return (float)(1.0 - r * (1.0 - dutyMod));
+    }
+    double span = (emerg - riseMod) > 0.1 ? (emerg - riseMod) : 0.1;
+    double r = (T - riseMod) / span;
+    return (float)(dutyMod - r * (dutyMod - dutyFloor));
+}
+
 - (float)pwmDuty {
-    // 紧急/重度：完全停充（emergencyHandler 全权接管，PWM 不干预）。
-    if (_emergencyLatched || _actuationStopped) return 0.0f;
-    // 没插电源：不 PWM（交给策略机）；容量到顶停充：不 PWM（避免与容量停充打架）。
-    if (!_adapterConnected || _capacityLatched) return 1.0f;
-    switch (self.currentLevel) {
-        case CLThermalLevelHeavy:     return 0.0f;
-        case CLThermalLevelModerate:  return getLocalInt(@"jy_pwm_moderate_duty", 55) / 100.0f;
-        case CLThermalLevelLight:     return getLocalInt(@"jy_pwm_light_duty", 85) / 100.0f;
-        case CLThermalLevelOff:
-        case CLThermalLevelNominal:
-        default:                      return 1.0f;
+    @synchronized(self) {
+        // 紧急/重度：完全停充（emergencyHandler 全权接管，PWM 不干预）——立即归零，不渐变。
+        if (_emergencyLatched || _actuationStopped) {
+            _smoothDuty = 0.0f; _hasDutyTs = NO;
+            return 0.0f;
+        }
+        // 没插电源 / 容量到顶停充：不 PWM（交给策略机）——立即回满，不渐变。
+        if (!_adapterConnected || _capacityLatched) {
+            _smoothDuty = 1.0f; _hasDutyTs = NO;
+            return 1.0f;
+        }
+        // 目标占空比随温度连续变化（无档位跳变）。
+        float target = CLDutyTargetForTemp(_lastTempC);
+        // 时间低通：占空比向目标平滑滑移（时间常数 jy_pwm_smooth_tau，默认 90s），
+        // 既"随温度连续"又"随时间柔和"，杜绝单样本温度抖动导致占空比骤变。
+        double now = CLContinuousSeconds();
+        if (!_hasDutyTs) {
+            _smoothDuty = target;
+            _lastDutyTs = now;
+            _hasDutyTs = YES;
+            return _smoothDuty;
+        }
+        double dt = now - _lastDutyTs;
+        _lastDutyTs = now;
+        if (dt <= 0) return _smoothDuty;
+        double tau = getLocalInt(@"jy_pwm_smooth_tau", 90);
+        float alpha = 1.0f - (float)exp(-dt / tau);
+        _smoothDuty += (target - _smoothDuty) * alpha;
+        if (_smoothDuty < 0.0f) _smoothDuty = 0.0f;
+        if (_smoothDuty > 1.0f) _smoothDuty = 1.0f;
+        return _smoothDuty;
     }
 }
 
