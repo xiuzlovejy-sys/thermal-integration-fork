@@ -136,6 +136,8 @@ static NSMutableArray* g_etaSamples = nil;
 static NSString* g_etaState = @"unplugged";   // unplugged/paused/charging/at_target/estimating/no_data
 static NSInteger g_etaMinutes = -1;           // -1 = 无有效估算
 static NSString* g_etaConfidence = @"low";
+// bat_info 新鲜度看门狗：读取成功即刷新；超过 90s 未成功 → 打警告（冻结可被日志发现）。
+static time_t g_lastBatInfoOkTs = 0;
 // Jy's charge 温控紧急停充（governor 44℃ 兜底）：
 // applyChargePolicy 的最高优先级分支读它——避免状态机下一轮把停充重新放开
 // （否则 governor 与策略机每轮互相覆盖）。清除后策略机自然恢复。
@@ -1024,27 +1026,36 @@ static kern_return_t setInflowStatusOverride(io_service_t serv, BOOL flag) {
     return IORegistryEntrySetCFProperties(serv, (__bridge CFTypeRef)props);
 }
 
-static io_service_t getIOPMPSServ() {
-    static io_service_t serv = IO_OBJECT_NULL;
-    if (serv == IO_OBJECT_NULL) {
-        // 读路径必须用发布电池属性的 service（AppleSmartBattery / IOPMPowerSource）。
-        // 切勿匹配 AppleSmartBatteryManager：它不发布 CurrentCapacity/Amperage，
-        // 会导致 UI 电量全 0（真机 2026-08-02 探针已证实）。
-        // iOS 17+ 默认优先 AppleSmartBattery（override 写目标与属性面一致）。
-        BOOL try_smart = getLocalBool(@"adv_prefer_smart", NO) || CLIsIOS17OrLater();
-        if (try_smart) {
-            serv = IOServiceGetMatchingService(kIOMasterPortDefault, IOServiceMatching("AppleSmartBattery")); // >=iPhone8
-        }
-        if (serv != IO_OBJECT_NULL) {
-            g_use_smart = YES;
-        } else {// SmartBattery not support, roll back to use IOPS
-            serv = IOServiceGetMatchingService(kIOMasterPortDefault, IOServiceMatching("IOPMPowerSource"));
-            // IOPMPowerSource:AppleARMPMUPowerSource:AppleARMPMUCharger
-            //      IOAccessoryTransport:IOAccessoryPowerSource:AppleARMPMUAccessoryPS
-            g_use_smart = NO;
-        }
+static io_service_t g_iopmpsServ = IO_OBJECT_NULL;
+
+// 缓存失效：电池服务在"安装/注销/重枚举"后旧句柄会失效，而缓存若不清，
+// getBatInfo 会永久失败 → bat_info 冻结 → 温控与 UI 全部失联（真机 2026-10-20 事故）。
+static void invalidateIOPMPSServCache(void) {
+    if (g_iopmpsServ != IO_OBJECT_NULL) {
+        IOObjectRelease(g_iopmpsServ);
+        g_iopmpsServ = IO_OBJECT_NULL;
     }
-    return serv;
+}
+
+static io_service_t getIOPMPSServ() {
+    if (g_iopmpsServ != IO_OBJECT_NULL) return g_iopmpsServ;
+    // 读路径必须用发布电池属性的 service（AppleSmartBattery / IOPMPowerSource）。
+    // 切勿匹配 AppleSmartBatteryManager：它不发布 CurrentCapacity/Amperage，
+    // 会导致 UI 电量全 0（真机 2026-08-02 探针已证实）。
+    // iOS 17+ 默认优先 AppleSmartBattery（override 写目标与属性面一致）。
+    BOOL try_smart = getLocalBool(@"adv_prefer_smart", NO) || CLIsIOS17OrLater();
+    if (try_smart) {
+        g_iopmpsServ = IOServiceGetMatchingService(kIOMasterPortDefault, IOServiceMatching("AppleSmartBattery")); // >=iPhone8
+    }
+    if (g_iopmpsServ != IO_OBJECT_NULL) {
+        g_use_smart = YES;
+    } else {// SmartBattery not support, roll back to use IOPS
+        g_iopmpsServ = IOServiceGetMatchingService(kIOMasterPortDefault, IOServiceMatching("IOPMPowerSource"));
+        // IOPMPowerSource:AppleARMPMUPowerSource:AppleARMPMUCharger
+        //      IOAccessoryTransport:IOAccessoryPowerSource:AppleARMPMUAccessoryPS
+        g_use_smart = NO;
+    }
+    return g_iopmpsServ;
 }
 
 static NSDictionary* getBatSlimInfo(NSDictionary* info) {
@@ -1099,9 +1110,21 @@ static int getBatInfo(NSDictionary* __strong* pinfo, BOOL slim=YES) {
         return -1;
     }
     CFMutableDictionaryRef props = nil;
-    IORegistryEntryCreateCFProperties(serv, &props, kCFAllocatorDefault, 0);
+    kern_return_t kr = IORegistryEntryCreateCFProperties(serv, &props, kCFAllocatorDefault, 0);
     if (props == nil) {
-        return -2;
+        // 缓存的服务句柄已失效（安装/注销后电池服务重枚举）：
+        // 必须清缓存 + 立即重枚举重试一次，否则 bat_info 会永久冻结。
+        time_t nowTs = time(0);
+        static time_t lastWarnTs = 0;
+        if (nowTs - lastWarnTs > 60) {
+            lastWarnTs = nowTs;
+            NSLog2(@"[Jy] getBatInfo: stale IOPM service kr=0x%x -> re-enumerate", kr);
+        }
+        invalidateIOPMPSServCache();
+        serv = getIOPMPSServ();
+        if (serv == IO_OBJECT_NULL) return -1;
+        kr = IORegistryEntryCreateCFProperties(serv, &props, kCFAllocatorDefault, 0);
+        if (props == nil) return -2;
     }
     NSMutableDictionary* info = (__bridge_transfer NSMutableDictionary*)props;
     if (slim) {
@@ -1109,6 +1132,7 @@ static int getBatInfo(NSDictionary* __strong* pinfo, BOOL slim=YES) {
     } else {
         *pinfo = info;
     }
+    g_lastBatInfoOkTs = time(0);
     return 0;
 }
 
@@ -4954,6 +4978,23 @@ static void clObserveOfflineAdvisory(NSDictionary* bat_info) {
 // 此处不动；满占空则清软停。PWM 周期按 jy_pwm_period_s（默认 60s）折算 tick 数。
 static void CLThermalPwmTick(void) {
     if (!g_enable) return;
+    // bat_info 冻结看门狗：读取成功会刷新 g_lastBatInfoOkTs；超过 90s 未成功
+    // 说明 getBatInfo 卡住（服务句柄失效等），此时温控与 UI 都是旧数据。
+    time_t nowTs = time(0);
+    if (g_lastBatInfoOkTs > 0 && (nowTs - g_lastBatInfoOkTs) > 90) {
+        static time_t lastStaleWarn = 0;
+        if (nowTs - lastStaleWarn > 60) {
+            lastStaleWarn = nowTs;
+            NSLog2(@"[Jy] WARN: bat_info stale for %lds (getBatInfo failing)",
+                   (long)(nowTs - g_lastBatInfoOkTs));
+            NSDateFormatter *df = [[NSDateFormatter alloc] init];
+            df.dateFormat = @"MM-dd HH:mm:ss";
+            [CLThermalGovernor appendLogLine:[NSString stringWithFormat:
+                @"%@ [warn] bat_info 冻结 %lds（读取失败，已重置服务缓存）",
+                [df stringFromDate:[NSDate date]], (long)(nowTs - g_lastBatInfoOkTs)]];
+            invalidateIOPMPSServCache();   // 节流：每 60s 重置一次，迫使重新枚举
+        }
+    }
     CLThermalGovernor* governor = [CLThermalGovernor sharedGovernor];
     float duty = [governor pwmDuty];
     BOOL stop;
