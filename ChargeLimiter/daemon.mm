@@ -131,6 +131,11 @@ static NSTimer* g_jyThermalEvalTimer = nil;
 // 软 PWM 柔性充电（RootHide 注入无关）：按 governor.pwmDuty 周期性软停/恢复，
 // 复用 g_jyThermalEmergencyStop + setChargeStatus 这条已验证的受控布尔通道。
 static NSTimer* g_jyPwmTimer = nil;
+// P2 剩余充电时间估算（只读，不干预控制）：滑动窗口 (time, RawCapacity) 样本。
+static NSMutableArray* g_etaSamples = nil;
+static NSString* g_etaState = @"unplugged";   // unplugged/paused/charging/at_target/estimating/no_data
+static NSInteger g_etaMinutes = -1;           // -1 = 无有效估算
+static NSString* g_etaConfidence = @"low";
 // Jy's charge 温控紧急停充（governor 44℃ 兜底）：
 // applyChargePolicy 的最高优先级分支读它——避免状态机下一轮把停充重新放开
 // （否则 governor 与策略机每轮互相覆盖）。清除后策略机自然恢复。
@@ -1044,7 +1049,7 @@ static io_service_t getIOPMPSServ() {
 static NSDictionary* getBatSlimInfo(NSDictionary* info) {
     NSMutableDictionary* filtered_info = [NSMutableDictionary dictionary];
     NSArray* keep = @[
-        @"Amperage", @"AppleRawCurrentCapacity", @"BatteryInstalled", @"BootVoltage", @"CurrentCapacity", @"CycleCount", @"DesignCapacity", @"ExternalChargeCapable", @"ExternalConnected",
+        @"Amperage", @"AppleRawCurrentCapacity", @"AppleRawMaxCapacity", @"BatteryInstalled", @"BootVoltage", @"CurrentCapacity", @"CycleCount", @"DesignCapacity", @"ExternalChargeCapable", @"ExternalConnected",
         @"InstantAmperage", @"IsCharging", @"ChargingOverride", @"NotChargingReason", @"NominalChargeCapacity", @"PostChargeWaitSeconds", @"PostDischargeWaitSeconds", @"PredictiveChargingInhibit", @"Serial", @"Temperature",
         @"UpdateTime", @"VirtualTemperature", @"Voltage"];
     for (NSString* key in info) {
@@ -4822,6 +4827,7 @@ static void refreshBatteryStateAndApplyPolicy(void) {
     if (0 != getBatInfo(&bat_info)) {
         return;
     }
+    updateChargeETA();   // P2：剩余充电时间（只读，先于 g_enable 门，正常充电也估算）
     updateStatistics();
     if (!g_enable) {
         return;
@@ -4846,6 +4852,79 @@ static void evaluateFullChargeSchedule(BOOL forceApply) {
         return;
     }
     refreshBatteryStateAndApplyPolicy();
+}
+
+// P2 剩余充电时间估算（只读，不干预充电控制）。
+// 核心：用 AppleRawCurrentCapacity（mAh 高精度，规避 1% SOC 阶梯噪声）的滑动窗口
+// 实测变化率做外推——天然吸收软 PWM 占空比、CC-CV taper、温度限流等一切减速因素，
+// 无需对充电曲线建模。只在"充电相位"（电流 > 100mA）采样，停充相位不污染。
+static void updateChargeETA(void) {
+    NSDictionary *safe = bat_info ?: @{};
+    BOOL external = [safe[@"ExternalConnected"] boolValue];
+    BOOL charging = [safe[@"IsCharging"] boolValue];
+    long long amp = [safe[@"InstantAmperage"] longLongValue];
+    NSNumber *rawCurObj = safe[@"AppleRawCurrentCapacity"];
+    NSNumber *rawMaxObj = safe[@"AppleRawMaxCapacity"];
+    NSInteger targetPct = getLocalInt(@"jy_max_percent", 80);
+
+    if (!external || rawCurObj == nil || rawMaxObj == nil) {
+        if (g_etaSamples == nil) g_etaSamples = [NSMutableArray array];
+        [g_etaSamples removeAllObjects];
+        g_etaMinutes = -1;
+        g_etaState = !external ? @"unplugged" : @"no_data";
+        return;
+    }
+    double rawCur = [rawCurObj doubleValue];
+    double rawMax = [rawMaxObj doubleValue];
+    if (rawMax <= 0 || rawCur < 0) { g_etaMinutes = -1; g_etaState = @"no_data"; return; }
+
+    double socPct = rawCur / rawMax * 100.0;
+    double remainMah = rawMax * targetPct / 100.0 - rawCur;
+
+    // 已达目标电量
+    if (remainMah <= 0) { g_etaMinutes = 0; g_etaState = @"at_target"; g_etaConfidence = @"high"; return; }
+
+    // 未在充电（软 PWM 停充相位 / 紧急停充 / 容量停充）→ 暂停计时，不采样
+    if (!charging || amp <= 100) {
+        g_etaMinutes = -1;
+        g_etaState = @"paused";
+        return;
+    }
+
+    // 采样：仅充电相位
+    if (g_etaSamples == nil) g_etaSamples = [NSMutableArray array];
+    NSTimeInterval t = [[NSDate date] timeIntervalSince1970];
+    [g_etaSamples addObject:@{@"t": @(t), @"mah": @(rawCur)}];
+    while (g_etaSamples.count > 2 && (t - [g_etaSamples[0][@"t"] doubleValue]) > 600.0) {
+        [g_etaSamples removeObjectAtIndex:0];   // 保留最近 10 分钟
+    }
+
+    double rateMahPerMin = 0;
+    double windowMin = 0;
+    NSUInteger n = g_etaSamples.count;
+    if (n >= 2) {
+        double t0 = [g_etaSamples[0][@"t"] doubleValue];
+        double t1 = [g_etaSamples[n-1][@"t"] doubleValue];
+        double m0 = [g_etaSamples[0][@"mah"] doubleValue];
+        double m1 = [g_etaSamples[n-1][@"mah"] doubleValue];
+        windowMin = (t1 - t0) / 60.0;
+        if (windowMin > 0) rateMahPerMin = (m1 - m0) / windowMin;
+    }
+
+    if (rateMahPerMin <= 0.5) {
+        g_etaMinutes = -1;
+        g_etaState = @"estimating";   // 样本不足 / 窗口太短
+        g_etaConfidence = @"low";
+        return;
+    }
+
+    g_etaMinutes = (NSInteger)lround(remainMah / rateMahPerMin);
+    if (socPct > 80 || g_etaSamples.count < 6 || windowMin < 2.0) {
+        g_etaConfidence = @"medium";   // 高 SOC taper / 样本少 → 降置信度
+    } else {
+        g_etaConfidence = @"high";
+    }
+    g_etaState = @"charging";
 }
 
 // 柔性温控入口（2026-10-18 用户授权接线）：
@@ -5308,6 +5387,10 @@ NSDictionary* handleReq(NSDictionary* nsreq) {
             kv[@"jy_gov_temp"] = govState[@"temp_c"] ?: @0;
             kv[@"jy_gov_amp"] = govState[@"amp_ma"] ?: @0;
             kv[@"jy_gov_charging"] = govState[@"charging"] ?: @NO;
+            // P2 剩余充电时间（只读估算）：分钟数 + 状态 + 置信度。
+            kv[@"jy_eta_min"] = @(g_etaMinutes);
+            kv[@"jy_eta_state"] = g_etaState ?: @"unplugged";
+            kv[@"jy_eta_conf"] = g_etaConfidence ?: @"low";
             // 生效验证诊断（design D5）：配置档位 + 最近一次应用结果，区分"已配置"与"已生效"。
             kv[@"thermal_config_mode"] = getThermalConfigMode();
             // 生效范围（thermal-sim-settings「当前生效」行）：与集中决策函数同一处裁决

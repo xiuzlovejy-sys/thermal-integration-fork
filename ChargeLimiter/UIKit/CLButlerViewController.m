@@ -560,6 +560,11 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
     return [v respondsToSelector:@selector(boolValue)] ? [v boolValue] : fallback;
 }
 
+- (NSString *)stringFromConf:(NSString *)key fallback:(NSString *)fallback {
+    id v = self.conf[key];
+    return [v isKindOfClass:[NSString class]] ? v : fallback;
+}
+
 - (void)renderBattery {
     id tempObj = self.batInfo[@"Temperature"];
     double centi = [tempObj respondsToSelector:@selector(doubleValue)] ? [tempObj doubleValue] : 0.0;
@@ -591,6 +596,22 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
         double volt = [self.batInfo[@"Voltage"] doubleValue] / 1000.0;
         double watt = volt * (ampAbs / 1000.0);
         if (watt >= 0.01) [tail appendFormat:@" · %.1fW", watt];
+    }
+    // P2 剩余充电时间（只读估算，随状态语义化）
+    NSString *etaState = [self stringFromConf:@"jy_eta_state" fallback:@""];
+    NSInteger etaMin = [self intFromConf:@"jy_eta_min" fallback:-1];
+    if ([etaState isEqualToString:@"charging"] && etaMin >= 0) {
+        NSString *etaText = (etaMin < 60)
+            ? [NSString stringWithFormat:@"%ld 分钟", (long)etaMin]
+            : [NSString stringWithFormat:@"%ld 时 %ld 分", (long)(etaMin / 60), (long)(etaMin % 60)];
+        NSString *conf = [self stringFromConf:@"jy_eta_conf" fallback:@"medium"];
+        [tail appendFormat:@" · 预计 %@%@", etaText, [conf isEqualToString:@"high"] ? @"" : @"（估）"];
+    } else if ([etaState isEqualToString:@"paused"]) {
+        [tail appendString:@" · 温控暂停"];
+    } else if ([etaState isEqualToString:@"estimating"]) {
+        [tail appendString:@" · 估算中…"];
+    } else if ([etaState isEqualToString:@"at_target"]) {
+        [tail appendString:@" · 已到目标电量"];
     }
     self.socLabel.text = [NSString stringWithFormat:@"%ld%% · %@%@",
                           (long)capacity, stateText, tail];
