@@ -189,18 +189,23 @@ static double CLContinuousSeconds(void) {
                                                  ownership:@"ours"];
     NSDictionary *thermal = [envelope[@"thermal"] isKindOfClass:[NSDictionary class]]
                                 ? envelope[@"thermal"] : nil;
-    NSDictionary *capacity = [envelope[@"capacity"] isKindOfClass:[NSDictionary class]]
-                                 ? envelope[@"capacity"] : nil;
     if (thermal == nil) return;
 
     // 容量到顶 latch：只做状态记账（UI/诊断展示"为什么停"），不作动。
     // 真正的停/恢复由上游 applyChargePolicy 的 charge_above/charge_below 执行。
-    if (capacity != nil) {
-        NSString *suggestion = [capacity[@"suggestion"] isKindOfClass:[NSString class]]
-                                   ? capacity[@"suggestion"] : @"none";
-        if ([suggestion isEqualToString:@"stop-review"]) {
+    //
+    // 注意：不能用 native_capacity 的 suggestion 驱动这个 latch。它只在
+    // thermal_safe 为真时才发 "resume-review"，而适配层恒置 thermal_safe=0
+    // （上游"绝不推断可恢复"原则），于是 resume-review 永不可达 → latch 只能置位
+    // 不能清除 → pwmDuty 永久返回 1.0，软 PWM 静默失效（真机 2026-10-19 现场）。
+    // 改用实时 SOC 直接判定，阈值与上游 charge_above/charge_below 同源。
+    NSInteger soc = [bat_info[@"CurrentCapacity"] integerValue];
+    if (bat_info[@"CurrentCapacity"] != nil) {
+        NSInteger maxPct = getLocalInt(@"jy_max_percent", 80);
+        NSInteger resumePct = getLocalInt(@"jy_resume_percent", 75);
+        if (soc >= maxPct) {
             [self setCapacityLatched:YES];
-        } else if ([suggestion isEqualToString:@"resume-review"]) {
+        } else if (soc <= resumePct) {
             [self setCapacityLatched:NO];
         }
     }
@@ -331,6 +336,8 @@ static NSString *CLTimestamp(void) {
         @"temp_c": @(_lastTempC),
         @"amp_ma": @(_lastAmpMa),
         @"charging": @(_lastCharging),
+        @"adapter": @(_adapterConnected),
+        @"pwm_duty": @([self pwmDuty]),
     };
 }
 

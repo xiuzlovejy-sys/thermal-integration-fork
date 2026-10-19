@@ -10,7 +10,7 @@ PACKAGE_CONTROLS = [
     REPO / "ChargeLimiter" / "Package_rootless" / "DEBIAN" / "control",
     REPO / "ChargeLimiter" / "Package_roothide" / "DEBIAN" / "control",
 ]
-EXPECTED_VERSION = "1.0.22"
+EXPECTED_VERSION = "1.0.23"
 
 
 class VersionSingleSourceTests(unittest.TestCase):

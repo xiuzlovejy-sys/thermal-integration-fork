@@ -4815,6 +4815,20 @@ static void CLThermalPwmTick(void) {
     }
     if (duty >= 0.99f) {
         stop = NO;
+        // 诊断：占空 100% 时每 60s 记一次"为什么不限流"，避免再次出现静默失效。
+        static NSTimeInterval lastIdleLog = 0;
+        NSTimeInterval nowTs = [NSDate timeIntervalSince1970];
+        if (nowTs - lastIdleLog > 60) {
+            lastIdleLog = nowTs;
+            NSDictionary *st = [governor stateSnapshot];
+            NSDateFormatter *df = [[NSDateFormatter alloc] init];
+            df.dateFormat = @"MM-dd HH:mm:ss";
+            [CLThermalGovernor appendLogLine:[NSString stringWithFormat:
+                @"%@ [pwm] idle 100%% lvl=%ld ad=%d cap=%d em=%d",
+                [df stringFromDate:[NSDate date]], (long)[st[@"level"] integerValue],
+                [st[@"adapter"] intValue], [st[@"capacity"] intValue],
+                [st[@"emergency"] intValue]]];
+        }
     } else {
         // 时间切片（精确到秒，不用 tick 量化）：周期越短电流波动越密、越接近连续调流。
         int period = MAX(10, getLocalInt(@"jy_pwm_period_s", 20));
