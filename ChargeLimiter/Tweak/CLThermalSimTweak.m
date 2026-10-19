@@ -376,6 +376,32 @@ static void CLTSHookSelector(Class cls, SEL sel, IMP newImp, IMP *origOut) {
     if (prev && *origOut == NULL) *origOut = prev;
 }
 
+// CommonProduct 在 iOS 15+/16.x thermalmonitord 可能是懒加载：dyld 注入我们的 ctor
+// 先于 thermalmonitord 主逻辑，彼时 objc_getClass("CommonProduct") 为 nil。Powercuff/
+// CPUthermal 用 Logos %hook（substrate 会等类出现自动重绑），我们手写 method_setImplementation
+// 只查一次就把类永远错过了。这里后台轮询补绑，一旦类出现立即挂钩并重放。
+static void CLTSBindCommonProductWhenLoaded(void) {
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        for (int i = 0; i < 240; i++) {   // 0.25s * 240 = 60s
+            Class cls = objc_getClass("CommonProduct");
+            if (cls != nil) {
+                static dispatch_once_t once;
+                dispatch_once(&once, ^{
+                    CLTSHookSelector(cls, @selector(initProduct:), (IMP)CLTSInitProductOverride, &CLTSOrigInitProduct);
+                    CLTSHookSelector(cls, sel_registerName("dealloc"), (IMP)CLTSDeallocOverride, &CLTSOrigDealloc);
+                });
+                CLTSLog(@"[ctor] late-bind CommonProduct=yes after %.2fs", i * 0.25);
+                NSLog(@"[CLThermalSim] late-bind CommonProduct ok (%.2fs)", i * 0.25);
+                CLTSApplyThermals();
+                return;
+            }
+            usleep(250 * 1000);
+        }
+        CLTSLog(@"[ctor] late-bind timeout: CommonProduct never loaded");
+        NSLog(@"[CLThermalSim] late-bind timeout: CommonProduct never loaded");
+    });
+}
+
 #pragma mark - 入口
 
 static IONotificationPortRef CLTSNotifyPort = NULL;
@@ -391,12 +417,13 @@ __attribute__((constructor)) static void CLTSInit(void) {
                 [NSProcessInfo processInfo].processName ?: @"?",
                 getpid(),
                 productClass != nil ? @"yes" : @"no");
-        // 16.6 缺 CommonProduct：枚举类找替代 API（只探一次，且仅在 thermalmonitord）。
-        if (productClass == nil) CLTSProbeClasses();
-        if (productClass != nil) { // 类缺失（系统变更）：静默退回
+        if (productClass != nil) {
             CLTSHookSelector(productClass, @selector(initProduct:), (IMP)CLTSInitProductOverride, &CLTSOrigInitProduct);
             // 捕获卫生（break98pl）：产品对象释放时清捕获，防僵尸下发
             CLTSHookSelector(productClass, sel_registerName("dealloc"), (IMP)CLTSDeallocOverride, &CLTSOrigDealloc);
+        } else {
+            // 懒加载兜底：类尚未注册时后台轮询补绑（Powercuff 用 Logos 自动等价于此）。
+            CLTSBindCommonProductWhenLoaded();
         }
         // 双通道（Mikasa 同款 notify_register_dispatch，主队列）：
         // 档位通知 → 即时下发；会话通知 → 会话边沿重算。

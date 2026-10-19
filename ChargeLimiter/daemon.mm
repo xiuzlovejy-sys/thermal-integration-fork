@@ -5383,13 +5383,18 @@ NSDictionary* handleReq(NSDictionary* nsreq) {
         [CLThermalGovernor clearLog];
         return @{@"status": @0, @"data": @{}};
     } else if ([api isEqualToString:@"jy_restart_thermald"]) {
-        // 诊断用：强制重启 thermalmonitord，让新装的注入 dylib 在进程启动时被加载。
-        // 注意必须检查 kill() 返回值——RootHide 隔离下 jbroot 进程可能无权
-        // 杀真实 rootfs 的系统进程（EPERM），不检查就会误报"已重启"。
+        // 诊断用：重启 thermalmonitord 换入新 dylib。首选 killall（Powercuff/CPUthermal
+        // 同款重载），jbroot 下 killall 能正确看见真实 rootfs 的 thermalmonitord；
+        // get_pid_of(KERN_PROC) 在某些 jbroot 命名空间看不到它。
+        int rc = system("/usr/bin/killall -9 thermalmonitord 2>/dev/null");
+        if (rc == 0) {
+            return @{@"status": @0, @"data": @{@"method": @"killall"}};
+        }
+        // 回退：sysctl 找 pid 直接 kill（可能 EPERM）。
         int pid = get_pid_of("thermalmonitord");
         if (pid > 1) {
             if (kill(pid, SIGKILL) == 0) {
-                return @{@"status": @0, @"data": @{@"killed_pid": @(pid)}};
+                return @{@"status": @0, @"data": @{@"method": @"kill", @"killed_pid": @(pid)}};
             }
             return @{@"status": @(-2),
                      @"data": @{@"error": @"kill failed (EPERM?)",
