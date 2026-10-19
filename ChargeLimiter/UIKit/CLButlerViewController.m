@@ -272,6 +272,9 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
     self.levelLabel = [self label:@"待机" size:13 weight:UIFontWeightMedium color:CLColorSub()];
     self.socLabel = [self label:@"--" size:13 weight:UIFontWeightRegular color:CLColorSub()];
     self.socLabel.textAlignment = NSTextAlignmentRight;
+    self.socLabel.adjustsFontSizeToFitWidth = YES;
+    self.socLabel.minimumScaleFactor = 0.65;
+    self.socLabel.lineBreakMode = NSLineBreakByClipping;
 
     [hero addSubview:self.tempLabel];
     [hero addSubview:unit];
@@ -299,6 +302,8 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
 
         [self.socLabel.centerYAnchor constraintEqualToAnchor:self.gaugeHint.centerYAnchor],
         [self.socLabel.trailingAnchor constraintEqualToAnchor:self.gauge.trailingAnchor],
+        // 防重叠：电量/电流/功率/ETA 变长时不得压到左侧「电池温度」上。
+        [self.socLabel.leadingAnchor constraintGreaterThanOrEqualToAnchor:self.gaugeHint.trailingAnchor constant:8],
 
         [self.levelDot.leadingAnchor constraintEqualToAnchor:hero.leadingAnchor constant:22],
         [self.levelDot.topAnchor constraintEqualToAnchor:self.gaugeHint.bottomAnchor constant:22],
@@ -597,21 +602,18 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
         double watt = volt * (ampAbs / 1000.0);
         if (watt >= 0.01) [tail appendFormat:@" · %.1fW", watt];
     }
-    // P2 剩余充电时间（只读估算，随状态语义化）
+    // P2 剩余充电时间：紧凑格式（避免与左侧「电池温度」重叠）
     NSString *etaState = [self stringFromConf:@"jy_eta_state" fallback:@""];
     NSInteger etaMin = [self intFromConf:@"jy_eta_min" fallback:-1];
     if ([etaState isEqualToString:@"charging"] && etaMin >= 0) {
-        NSString *etaText = (etaMin < 60)
-            ? [NSString stringWithFormat:@"%ld 分钟", (long)etaMin]
-            : [NSString stringWithFormat:@"%ld 时 %ld 分", (long)(etaMin / 60), (long)(etaMin % 60)];
-        NSString *conf = [self stringFromConf:@"jy_eta_conf" fallback:@"medium"];
-        [tail appendFormat:@" · 预计 %@%@", etaText, [conf isEqualToString:@"high"] ? @"" : @"（估）"];
+        if (etaMin < 60) [tail appendFormat:@" · %ld分", (long)etaMin];
+        else [tail appendFormat:@" · %ld时%ld分", (long)(etaMin / 60), (long)(etaMin % 60)];
     } else if ([etaState isEqualToString:@"paused"]) {
-        [tail appendString:@" · 温控暂停"];
+        [tail appendString:@" · 暂停"];
     } else if ([etaState isEqualToString:@"estimating"]) {
-        [tail appendString:@" · 估算中…"];
+        [tail appendString:@" · 估算中"];
     } else if ([etaState isEqualToString:@"at_target"]) {
-        [tail appendString:@" · 已到目标电量"];
+        [tail appendString:@" · 已满"];
     }
     self.socLabel.text = [NSString stringWithFormat:@"%ld%% · %@%@",
                           (long)capacity, stateText, tail];
@@ -729,11 +731,15 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
     [[CLAPIClient shared] setConfigWithKey:key value:value completion:^(NSDictionary *response, NSError *error) {
         if (error != nil) {
             [self showStatus:[NSString stringWithFormat:@"%@ 保存失败：连接错误", key] ok:NO];
+            // 回滚 UI 到已知 conf：否则开关"看起来开了"但实际没写进去，
+            // 下次刷新又会自己弹回去（用户会以为开关"自己关了"）。
+            [self renderSettings];
             return;
         }
         NSInteger status = [response[@"status"] integerValue];
         if (status != 0) {
             [self showStatus:[NSString stringWithFormat:@"%@ 被拒绝（%ld）", key, (long)status] ok:NO];
+            [self renderSettings];
         }
     }];
 }

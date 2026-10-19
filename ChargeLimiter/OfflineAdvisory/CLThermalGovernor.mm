@@ -387,6 +387,11 @@ static float CLDutyTarget(double effT) {
 
 - (float)pwmDuty {
     @synchronized(self) {
+        // 温控总开关关闭：完全不参与 PWM，立即回满（否则"关了温控还在限流"）。
+        if (!getLocalBool(@"jy_thermal_enabled", YES)) {
+            _smoothDuty = 1.0f; _hasDutyTs = NO;
+            return 1.0f;
+        }
         // 紧急/重度：完全停充（emergencyHandler 全权接管，PWM 不干预）——立即归零，不渐变。
         if (_emergencyLatched || _actuationStopped) {
             _smoothDuty = 0.0f; _hasDutyTs = NO;
