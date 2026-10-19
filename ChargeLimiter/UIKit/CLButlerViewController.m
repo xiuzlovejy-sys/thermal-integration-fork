@@ -109,6 +109,10 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
 @property (nonatomic, strong) NSLayoutConstraint *logHeight;
 @property (nonatomic, strong) NSTimer *logTimer;
 @property (nonatomic, strong) UISwitch *logSwitch;
+// 自 2009-04-18 起的天数计数（纪念日）
+@property (nonatomic, strong) UILabel *dayCountLabel;
+// 底部版本号
+@property (nonatomic, strong) UILabel *versionLabel;
 
 // 显式声明（避免"方法定义在使用之后"的实例方法解析差异，编译更稳）
 - (void)refresh;
@@ -133,6 +137,7 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
 - (void)logToggled:(UISwitch *)sender;
 - (void)restartThermald;
 - (void)probeHW;
+- (void)updateDayCount;
 
 @end
 
@@ -242,7 +247,9 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
     // ---- 标题 ----
     UILabel *title = [self label:@"Jy's charge" size:20 weight:UIFontWeightSemibold color:CLColorText()];
     UILabel *subtitle = [self label:@"智能温控充电" size:12 weight:UIFontWeightRegular color:CLColorSub()];
-    UIStackView *titleStack = [[UIStackView alloc] initWithArrangedSubviews:@[title, subtitle]];
+    self.dayCountLabel = [self label:@"" size:12 weight:UIFontWeightMedium color:CLColorTeal()];
+    [self updateDayCount];
+    UIStackView *titleStack = [[UIStackView alloc] initWithArrangedSubviews:@[title, subtitle, self.dayCountLabel]];
     titleStack.axis = UILayoutConstraintAxisVertical;
     titleStack.spacing = 3;
     [stack addArrangedSubview:titleStack];
@@ -507,6 +514,16 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
     [NSLayoutConstraint activateConstraints:@[
         [self.statusLabel.heightAnchor constraintGreaterThanOrEqualToConstant:20],
     ]];
+
+    // ---- 版本号（整个软件最下方）----
+    NSString *ver = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"];
+    self.versionLabel = [self label:[NSString stringWithFormat:@"Jy's charge v%@", ver ?: @"?"]
+                               size:11 weight:UIFontWeightRegular color:CLColorSub()];
+    self.versionLabel.textAlignment = NSTextAlignmentCenter;
+    [stack addArrangedSubview:self.versionLabel];
+    [NSLayoutConstraint activateConstraints:@[
+        [self.versionLabel.heightAnchor constraintGreaterThanOrEqualToConstant:16],
+    ]];
 }
 
 #pragma mark - 数据刷新
@@ -561,15 +578,36 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
     NSInteger capacity = [self.batInfo[@"CurrentCapacity"] integerValue];
     BOOL charging = [self.batInfo[@"IsCharging"] boolValue];
     BOOL external = [self.batInfo[@"ExternalConnected"] boolValue];
-    NSString *power = external ? (charging ? @"充电中" : @"已接通电源") : @"未接电源";
-    // 实测电流（iOS 充电时为负值）：档位升降后这个数字是否变化，是柔性调控
-    // 是否真的生效的直接证据，所以放在主界面而不是埋进诊断页。
-    long long amp = [self.batInfo[@"InstantAmperage"] longLongValue];
+    NSString *stateText = external ? (charging ? @"充电中" : @"已接通电源") : @"未接电源";
+    // 电流优先用 Amperage（平滑值更稳、更准），缺失回退 InstantAmperage。
+    NSNumber *ampObj = self.batInfo[@"Amperage"] ?: self.batInfo[@"InstantAmperage"];
+    long long amp = [ampObj longLongValue];
     long long ampAbs = (amp < 0) ? -amp : amp;
-    NSString *ampText = (external && ampAbs > 0)
-        ? [NSString stringWithFormat:@" · %lldmA", ampAbs] : @"";
+    NSMutableString *tail = [NSMutableString string];
+    if (charging && ampAbs > 0) {
+        [tail appendFormat:@" · %lldmA", ampAbs];
+        // 充电功率 = 电池电压(V) × 充电电流(A)（如 4.1V × 2.15A ≈ 8.8W）
+        double volt = [self.batInfo[@"Voltage"] doubleValue] / 1000.0;
+        double watt = volt * (ampAbs / 1000.0);
+        if (watt >= 0.01) [tail appendFormat:@" · %.1fW", watt];
+    }
     self.socLabel.text = [NSString stringWithFormat:@"%ld%% · %@%@",
-                          (long)capacity, power, ampText];
+                          (long)capacity, stateText, tail];
+}
+
+// 自 2009-04-18 起的天数（动态，每天 +1）
+- (void)updateDayCount {
+    NSDateFormatter *fmt = [[NSDateFormatter alloc] init];
+    fmt.dateFormat = @"yyyy-MM-dd";
+    fmt.timeZone = [NSTimeZone localTimeZone];
+    NSDate *ref = [fmt dateFromString:@"2009-04-18"];
+    NSDate *now = [NSDate date];
+    // 以自然日为准（按日历天数，不计时/分/秒）
+    NSCalendar *cal = [NSCalendar currentCalendar];
+    NSDate *refDay = [cal startOfDayForDate:ref];
+    NSDate *nowDay = [cal startOfDayForDate:now];
+    NSInteger days = [cal components:NSCalendarUnitDay fromDate:refDay toDate:nowDay options:0].day;
+    self.dayCountLabel.text = [NSString stringWithFormat:@"自 2009.04.18 已 %ld 天", (long)days];
 }
 
 - (void)renderLevel {

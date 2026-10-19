@@ -30,6 +30,7 @@ static NSString *const CLGovernorApplyNotification = @"com.jy.charge.thermalappl
 @property (nonatomic) double lastTempC;            // 最近一次电池事件实测温度
 @property (nonatomic) long long lastAmpMa;         // 最近一次实测电流（原始符号）
 @property (nonatomic) BOOL lastCharging;
+@property (nonatomic) BOOL adapterConnected;        // 最近一次事件是否已接电源（不受停充影响）
 @property (nonatomic) CLOfflineAdvisory *advisory;   // 跨轮复用：tp_policy 状态在实例内
 // 日志节流：档位/动作变化必记，其余每 30 秒一条心跳。
 @property (nonatomic) NSInteger loggedLevel;
@@ -171,6 +172,10 @@ static double CLContinuousSeconds(void) {
     id ampObj = bat_info[@"InstantAmperage"];
     _lastAmpMa = [ampObj respondsToSelector:@selector(longLongValue)] ? [ampObj longLongValue] : 0;
     _lastCharging = [bat_info[@"IsCharging"] boolValue];
+    // 接电源判定：PWM 阶段里 IsCharging 会被软停置 0，只能用 External* 判"插着电源"，
+    // 否则 PWM 停充后会误判成"拔电"而立刻恢复，占空比失效。
+    self.adapterConnected = [bat_info[@"ExternalConnected"] boolValue] ||
+                            [bat_info[@"ExternalChargeCapable"] boolValue];
 
     if (self.advisory == nil) self.advisory = [CLOfflineAdvisory new];
     // 采样戳必须给：tp_step 的硬校验要求 has_age && age_s <= max_age_s，
@@ -327,6 +332,21 @@ static NSString *CLTimestamp(void) {
         @"amp_ma": @(_lastAmpMa),
         @"charging": @(_lastCharging),
     };
+}
+
+- (float)pwmDuty {
+    // 紧急/重度：完全停充（emergencyHandler 全权接管，PWM 不干预）。
+    if (_emergencyLatched || _actuationStopped) return 0.0f;
+    // 没插电源：不 PWM（交给策略机）；容量到顶停充：不 PWM（避免与容量停充打架）。
+    if (!_adapterConnected || _capacityLatched) return 1.0f;
+    switch (self.currentLevel) {
+        case CLThermalLevelHeavy:     return 0.0f;
+        case CLThermalLevelModerate:  return getLocalInt(@"jy_pwm_moderate_duty", 55) / 100.0f;
+        case CLThermalLevelLight:     return getLocalInt(@"jy_pwm_light_duty", 85) / 100.0f;
+        case CLThermalLevelOff:
+        case CLThermalLevelNominal:
+        default:                      return 1.0f;
+    }
 }
 
 @end

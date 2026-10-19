@@ -34,6 +34,11 @@ typedef NS_ENUM(uint64_t, CLThermalLevel) {
 // （Temperature 厘摄氏度、InstantAmperage、IsCharging、ExternalConnected）。
 - (void)evaluateBattery:(NSDictionary *)bat_info;
 
+// 软 PWM 占空比（RootHide 下注入无关的"柔性"实现）：0.0=全停(紧急/heavy)，
+// 0~1=温度分级平均充电占比（light/moderate 读 jy_pwm_*_duty 设置）。
+// 仅在"已接电源 + 未到容量停充"时参与 PWM；否则返回 1.0（不干预）。
+- (float)pwmDuty;
+
 // 只读状态快照（get_conf 上报给 App）：level / stopped / emergency / capacity。
 // temp_c / amp_ma 为最近一次电池事件实测值——App 与日志据此判断"档位是否真的
 // 带来了电流变化"（柔性调控的唯一可观测证据，控制器本身不臆造效果）。
@@ -44,6 +49,7 @@ typedef NS_ENUM(uint64_t, CLThermalLevel) {
 + (NSString *)logPath;
 + (NSString *)logTailWithMaxLines:(NSUInteger)lines;
 + (void)clearLog;
++ (void)appendLogLine:(NSString *)line;   // daemon 侧（如软 PWM tick）也写同一份日志
 
 @end
 

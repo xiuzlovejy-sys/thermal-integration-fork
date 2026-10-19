@@ -128,6 +128,10 @@ static BOOL g_chargeCommandEnabled = YES;
 // 温控闭环心跳（Jy's charge）：IOKit 的电池属性在充电稳态下可能长时间不变，
 // 纯事件驱动会让档位"冻住"——温度上升了却没人重新评估。
 static NSTimer* g_jyThermalEvalTimer = nil;
+// 软 PWM 柔性充电（RootHide 注入无关）：按 governor.pwmDuty 周期性软停/恢复，
+// 复用 g_jyThermalEmergencyStop + setChargeStatus 这条已验证的受控布尔通道。
+static NSTimer* g_jyPwmTimer = nil;
+static int g_jyPwmCounter = 0;
 // Jy's charge 温控紧急停充（governor 44℃ 兜底）：
 // applyChargePolicy 的最高优先级分支读它——避免状态机下一轮把停充重新放开
 // （否则 governor 与策略机每轮互相覆盖）。清除后策略机自然恢复。
@@ -4799,6 +4803,38 @@ static void clObserveOfflineAdvisory(NSDictionary* bat_info) {
     [governor evaluateBattery:bat_info];
 }
 
+// 软 PWM 柔性充电 tick（每 5s）：读 governor 占空比，把 g_jyThermalEmergencyStop +
+// setChargeStatus 当作"可变占空比开关"驱动。紧急(占空 0)归 emergencyHandler 全权，
+// 此处不动；满占空则清软停。PWM 周期按 jy_pwm_period_s（默认 60s）折算 tick 数。
+static void CLThermalPwmTick(void) {
+    if (!g_enable) return;
+    CLThermalGovernor* governor = [CLThermalGovernor sharedGovernor];
+    float duty = [governor pwmDuty];
+    g_jyPwmCounter++;
+    BOOL stop;
+    if (duty <= 0.01f) {
+        return;   // 紧急/重度：emergencyHandler 已停充，PWM 不干预
+    }
+    if (duty >= 0.99f) {
+        stop = NO;
+    } else {
+        int periodTicks = MAX(2, getLocalInt(@"jy_pwm_period_s", 60) / 5);
+        int onTicks = (int)lroundf(duty * periodTicks);
+        stop = (g_jyPwmCounter % periodTicks) >= onTicks;
+    }
+    if (stop != g_jyThermalEmergencyStop) {
+        g_jyThermalEmergencyStop = stop;
+        setChargeStatus(!stop);
+        NSDateFormatter *f = [[NSDateFormatter alloc] init];
+        f.dateFormat = @"MM-dd HH:mm:ss";
+        NSString *ts = [f stringFromDate:[NSDate date]];
+        [CLThermalGovernor appendLogLine:[NSString stringWithFormat:
+            @"%@ [pwm] duty=%.0f%% -> %@", ts, duty * 100.0f,
+            stop ? @"STOP" : @"CHARGE"]];
+        NSLog(@"[Jy] soft-PWM duty=%.0f%% -> %@", duty * 100.0f, stop ? @"STOP" : @"CHARGE");
+    }
+}
+
 static void onBatteryEvent(io_service_t serv) {
     @autoreleasepool {
         NSDictionary* old_bat_info = bat_info;
@@ -6393,7 +6429,20 @@ int main(int argc, char** argv) { // daemon_main
                     refreshBatteryStateAndApplyPolicy();
                 }];
             }
+            // 软 PWM 柔性充电：5 秒一个相位步进（占空比按 jy_pwm_period_s 折算）。
+            // 注入无关，复用已验证的 setChargeStatus 受控通道。
+            if (g_jyPwmTimer == nil) {
+                g_jyPwmTimer = [NSTimer scheduledTimerWithTimeInterval:5.0
+                                                               repeats:YES
+                                                                 block:^(NSTimer* timer) {
+                    CLThermalPwmTick();
+                }];
+            }
             atexit_b(^{
+                if (g_jyPwmTimer != nil) {
+                    [g_jyPwmTimer invalidate];
+                    g_jyPwmTimer = nil;
+                }
                 if (g_jyThermalEvalTimer != nil) {
                     [g_jyThermalEvalTimer invalidate];
                     g_jyThermalEvalTimer = nil;
