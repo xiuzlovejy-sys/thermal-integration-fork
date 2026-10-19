@@ -5122,6 +5122,41 @@ static NSDictionary* CLMasterOffGateRequest(NSString* api, NSDictionary* nsreq) 
     return @{@"status": @(-403), @"error": @"master_switch_off"};
 }
 
+// 递归展开 NSDictionary/NSArray，用于 jy_hw 把充电器服务里的嵌套配置（Adapter Menu /
+// Active Charging Capability / Power Source Items 等）完整打印出来。
+static void JYAppendValue(NSMutableString *out, id v, int depth) {
+    NSString *pad = [@"" stringByPaddingToLength:(NSUInteger)(depth * 2) withString:@" " startingAtIndex:0];
+    if ([v isKindOfClass:[NSDictionary class]]) {
+        for (NSString *k in [[(NSDictionary *)v allKeys] sortedArrayUsingSelector:@selector(compare:)]) {
+            id sub = v[k];
+            if ([sub isKindOfClass:[NSDictionary class]] || [sub isKindOfClass:[NSArray class]]) {
+                [out appendFormat:@"%@%@ = {\n", pad, k];
+                JYAppendValue(out, sub, depth + 1);
+                [out appendFormat:@"%@}\n", pad];
+            } else if ([sub isKindOfClass:[NSData class]]) {
+                NSData *d = (NSData *)sub;
+                [out appendFormat:@"%@%@ = <data %luB>\n", pad, k, (unsigned long)d.length];
+            } else {
+                [out appendFormat:@"%@%@ = %@\n", pad, k, sub];
+            }
+        }
+    } else if ([v isKindOfClass:[NSArray class]]) {
+        NSInteger i = 0;
+        for (id item in (NSArray *)v) {
+            if ([item isKindOfClass:[NSDictionary class]] || [item isKindOfClass:[NSArray class]]) {
+                [out appendFormat:@"%@[%ld] = {\n", pad, (long)i];
+                JYAppendValue(out, item, depth + 1);
+                [out appendFormat:@"%@}\n", pad];
+            } else if ([item isKindOfClass:[NSData class]]) {
+                [out appendFormat:@"%@[%ld] = <data %luB>\n", pad, (long)i, (unsigned long)((NSData *)item).length];
+            } else {
+                [out appendFormat:@"%@[%ld] = %@\n", pad, (long)i, item];
+            }
+            i++;
+        }
+    }
+}
+
 NSDictionary* handleReq(NSDictionary* nsreq) {
     g_lastMasterOffRequestTs = time(0);   // 非驻留形态空闲退出计时（B4）
     syncDaemonDocumentsForRequest(nsreq);
@@ -5456,20 +5491,23 @@ NSDictionary* handleReq(NSDictionary* nsreq) {
                 [out appendFormat:@"\n== %@ ==  (共 %lu 键)\n", cname, (unsigned long)cd.count];
                 for (NSString *k in [[cd allKeys] sortedArrayUsingSelector:@selector(compare:)]) {
                     id v = cd[k];
-                    NSString *desc;
-                    if ([v isKindOfClass:[NSDictionary class]] || [v isKindOfClass:[NSArray class]] || [v isKindOfClass:[NSData class]]) {
-                        desc = [NSString stringWithFormat:@"<%@>", NSStringFromClass([v class])];
+                    if ([v isKindOfClass:[NSDictionary class]] || [v isKindOfClass:[NSArray class]]) {
+                        [out appendFormat:@"  %@ = {\n", k];
+                        JYAppendValue(out, v, 3);
+                        [out appendString:@"  }\n"];
                     } else {
-                        desc = [v description];
+                        NSString *wr = @"";
+                        if ([v isKindOfClass:[NSNumber class]]) {
+                            kern_return_t kr = IORegistryEntrySetCFProperties(csvc, (__bridge CFDictionaryRef)@{k: v});
+                            if (kr == KERN_SUCCESS) wr = @"  [可写✓]";
+                            else if (kr == -536870206) wr = @"  [只读]";
+                            else wr = [NSString stringWithFormat:@"  [kr=0x%x]", kr];
+                        }
+                        NSString *desc = [v isKindOfClass:[NSData class]]
+                            ? [NSString stringWithFormat:@"<data %luB>", (unsigned long)((NSData *)v).length]
+                            : [v description];
+                        [out appendFormat:@"  %@ = %@%@\n", k, desc, wr];
                     }
-                    NSString *wr = @"";
-                    if ([v isKindOfClass:[NSNumber class]]) {
-                        kern_return_t kr = IORegistryEntrySetCFProperties(csvc, (__bridge CFDictionaryRef)@{k: v});
-                        if (kr == KERN_SUCCESS) wr = @"  [可写✓]";
-                        else if (kr == -536870206) wr = @"  [只读]";
-                        else wr = [NSString stringWithFormat:@"  [kr=0x%x]", kr];
-                    }
-                    [out appendFormat:@"  %@ = %@%@\n", k, desc, wr];
                 }
                 IOObjectRelease(csvc);
             }
