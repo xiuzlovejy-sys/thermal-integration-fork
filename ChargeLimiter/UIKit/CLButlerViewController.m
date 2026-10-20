@@ -186,6 +186,16 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
 @property (nonatomic, strong) CLCurveView *curveView;
 @property (nonatomic, strong) NSMutableArray<NSDictionary *> *curveSamples;
 @property (nonatomic, assign) NSTimeInterval curveLastSampleTs;
+// 紧急补电（定时暂停温控，到点自动恢复）
+@property (nonatomic, strong) UIButton *urgentButton;
+// 充电模式预设（护电/均衡/快充）
+@property (nonatomic, strong) UISegmentedControl *presetControl;
+// 本次充电统计
+@property (nonatomic, strong) UILabel *sessStateLabel;
+@property (nonatomic, strong) UILabel *sessPeakLabel;
+@property (nonatomic, strong) UILabel *sessAvgLabel;
+@property (nonatomic, strong) UILabel *sessMahLabel;
+@property (nonatomic, strong) UILabel *sessCyclesLabel;
 
 // 显式声明（避免"方法定义在使用之后"的实例方法解析差异，编译更稳）
 - (void)refresh;
@@ -212,6 +222,11 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
 - (void)probeHW;
 - (void)updateDayCount;
 - (void)sampleCurveIfNeeded;
+- (void)urgentTopUp:(UIButton *)sender;
+- (void)updateUrgentButton;
+- (void)presetChanged:(UISegmentedControl *)sender;
+- (void)renderSession;
+- (double)doubleFromConf:(NSString *)key fallback:(double)fallback;
 
 @end
 
@@ -404,6 +419,19 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
     [switchCard addSubview:swTitle];
     [switchCard addSubview:swDesc];
     [switchCard addSubview:self.thermalSwitch];
+
+    // 紧急补电：临时暂停温控（满速充），到点自动恢复，避免忘记打开。
+    self.urgentButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    self.urgentButton.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.urgentButton setTitle:@"紧急补电 30 分钟" forState:UIControlStateNormal];
+    self.urgentButton.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
+    [self.urgentButton setTitleColor:CLColorAmber() forState:UIControlStateNormal];
+    self.urgentButton.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.06];
+    self.urgentButton.layer.cornerRadius = 12;
+    self.urgentButton.contentEdgeInsets = UIEdgeInsetsMake(6, 12, 6, 12);
+    [self.urgentButton addTarget:self action:@selector(urgentTopUp:) forControlEvents:UIControlEventTouchUpInside];
+    [switchCard addSubview:self.urgentButton];
+
     [NSLayoutConstraint activateConstraints:@[
         [swTitle.topAnchor constraintEqualToAnchor:switchCard.topAnchor constant:18],
         [swTitle.leadingAnchor constraintEqualToAnchor:switchCard.leadingAnchor constant:20],
@@ -415,7 +443,11 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
         [swDesc.topAnchor constraintEqualToAnchor:swTitle.bottomAnchor constant:6],
         [swDesc.leadingAnchor constraintEqualToAnchor:swTitle.leadingAnchor],
         [swDesc.trailingAnchor constraintEqualToAnchor:switchCard.trailingAnchor constant:-20],
-        [swDesc.bottomAnchor constraintEqualToAnchor:switchCard.bottomAnchor constant:-18],
+
+        [self.urgentButton.topAnchor constraintEqualToAnchor:swDesc.bottomAnchor constant:10],
+        [self.urgentButton.leadingAnchor constraintEqualToAnchor:swDesc.leadingAnchor],
+        [self.urgentButton.heightAnchor constraintEqualToConstant:30],
+        [self.urgentButton.bottomAnchor constraintEqualToAnchor:switchCard.bottomAnchor constant:-16],
     ]];
 
     // ---- 最大充电卡 ----
@@ -454,6 +486,34 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
         [maxDesc.leadingAnchor constraintEqualToAnchor:maxTitle.leadingAnchor],
         [maxDesc.trailingAnchor constraintEqualToAnchor:maxCard.trailingAnchor constant:-20],
         [maxDesc.bottomAnchor constraintEqualToAnchor:maxCard.bottomAnchor constant:-18],
+    ]];
+
+    // ---- 充电模式（预设）----
+    UIView *presetCard = [self card];
+    [stack addArrangedSubview:presetCard];
+    UILabel *prTitle = [self label:@"充电模式" size:16 weight:UIFontWeightMedium color:CLColorText()];
+    UILabel *prDesc = [self label:@"一键切换推荐参数，切换后仍可手动微调" size:12 weight:UIFontWeightRegular color:CLColorSub()];
+    prDesc.numberOfLines = 0;
+    self.presetControl = [[UISegmentedControl alloc] initWithItems:@[@"护电", @"均衡", @"快充"]];
+    self.presetControl.translatesAutoresizingMaskIntoConstraints = NO;
+    self.presetControl.selectedSegmentIndex = UISegmentedControlNoSegment;
+    self.presetControl.selectedSegmentTintColor = CLColorTeal();
+    [self.presetControl addTarget:self action:@selector(presetChanged:)
+                 forControlEvents:UIControlEventValueChanged];
+    [presetCard addSubview:prTitle];
+    [presetCard addSubview:prDesc];
+    [presetCard addSubview:self.presetControl];
+    [NSLayoutConstraint activateConstraints:@[
+        [prTitle.topAnchor constraintEqualToAnchor:presetCard.topAnchor constant:18],
+        [prTitle.leadingAnchor constraintEqualToAnchor:presetCard.leadingAnchor constant:20],
+        [prDesc.topAnchor constraintEqualToAnchor:prTitle.bottomAnchor constant:6],
+        [prDesc.leadingAnchor constraintEqualToAnchor:prTitle.leadingAnchor],
+        [prDesc.trailingAnchor constraintEqualToAnchor:presetCard.trailingAnchor constant:-20],
+        [self.presetControl.topAnchor constraintEqualToAnchor:prDesc.bottomAnchor constant:12],
+        [self.presetControl.leadingAnchor constraintEqualToAnchor:presetCard.leadingAnchor constant:20],
+        [self.presetControl.trailingAnchor constraintEqualToAnchor:presetCard.trailingAnchor constant:-20],
+        [self.presetControl.heightAnchor constraintEqualToConstant:32],
+        [self.presetControl.bottomAnchor constraintEqualToAnchor:presetCard.bottomAnchor constant:-18],
     ]];
 
     // ---- 温控起点卡 ----
@@ -529,6 +589,41 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
         [legend.topAnchor constraintEqualToAnchor:self.curveView.bottomAnchor constant:10],
         [legend.leadingAnchor constraintEqualToAnchor:curveCard.leadingAnchor constant:20],
         [legend.bottomAnchor constraintEqualToAnchor:curveCard.bottomAnchor constant:-16],
+    ]];
+
+    // ---- 本次充电统计 ----
+    UIView *sessCard = [self card];
+    [stack addArrangedSubview:sessCard];
+    UILabel *seTitle = [self label:@"本次充电" size:13 weight:UIFontWeightSemibold color:CLColorText()];
+    self.sessStateLabel = [self label:@"" size:11 weight:UIFontWeightRegular color:CLColorSub()];
+    self.sessStateLabel.textAlignment = NSTextAlignmentRight;
+    self.sessPeakLabel = [self label:@"峰值 --" size:11 weight:UIFontWeightRegular color:CLColorOrange()];
+    self.sessAvgLabel  = [self label:@"平均 --" size:11 weight:UIFontWeightRegular color:CLColorSub()];
+    self.sessAvgLabel.textAlignment = NSTextAlignmentRight;
+    self.sessMahLabel  = [self label:@"充入 --" size:11 weight:UIFontWeightRegular color:CLColorTeal()];
+    self.sessCyclesLabel = [self label:@"启停 --" size:11 weight:UIFontWeightRegular color:CLColorAmber()];
+    self.sessCyclesLabel.textAlignment = NSTextAlignmentRight;
+
+    for (UILabel *l in @[seTitle, self.sessStateLabel, self.sessPeakLabel, self.sessAvgLabel,
+                         self.sessMahLabel, self.sessCyclesLabel]) {
+        [sessCard addSubview:l];
+    }
+    [NSLayoutConstraint activateConstraints:@[
+        [seTitle.topAnchor constraintEqualToAnchor:sessCard.topAnchor constant:18],
+        [seTitle.leadingAnchor constraintEqualToAnchor:sessCard.leadingAnchor constant:20],
+        [self.sessStateLabel.centerYAnchor constraintEqualToAnchor:seTitle.centerYAnchor],
+        [self.sessStateLabel.trailingAnchor constraintEqualToAnchor:sessCard.trailingAnchor constant:-20],
+
+        [self.sessPeakLabel.topAnchor constraintEqualToAnchor:seTitle.bottomAnchor constant:10],
+        [self.sessPeakLabel.leadingAnchor constraintEqualToAnchor:seTitle.leadingAnchor],
+        [self.sessAvgLabel.centerYAnchor constraintEqualToAnchor:self.sessPeakLabel.centerYAnchor],
+        [self.sessAvgLabel.trailingAnchor constraintEqualToAnchor:sessCard.trailingAnchor constant:-20],
+
+        [self.sessMahLabel.topAnchor constraintEqualToAnchor:self.sessPeakLabel.bottomAnchor constant:8],
+        [self.sessMahLabel.leadingAnchor constraintEqualToAnchor:seTitle.leadingAnchor],
+        [self.sessCyclesLabel.centerYAnchor constraintEqualToAnchor:self.sessMahLabel.centerYAnchor],
+        [self.sessCyclesLabel.trailingAnchor constraintEqualToAnchor:sessCard.trailingAnchor constant:-20],
+        [self.sessMahLabel.bottomAnchor constraintEqualToAnchor:sessCard.bottomAnchor constant:-18],
     ]];
 
     // ---- 运行日志（默认折叠；排障时展开）----
@@ -682,6 +777,11 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
     return [v isKindOfClass:[NSString class]] ? v : fallback;
 }
 
+- (double)doubleFromConf:(NSString *)key fallback:(double)fallback {
+    id v = self.conf[key];
+    return [v respondsToSelector:@selector(doubleValue)] ? [v doubleValue] : fallback;
+}
+
 // 曲线采样：每 5 秒一点，保留 30 分钟（360 点）。只在 App 内存里存，不写盘、不碰 daemon。
 - (void)sampleCurveIfNeeded {
     NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
@@ -719,7 +819,8 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
     NSInteger capacity = [self.batInfo[@"CurrentCapacity"] integerValue];
     BOOL charging = [self.batInfo[@"IsCharging"] boolValue];
     BOOL external = [self.batInfo[@"ExternalConnected"] boolValue];
-    NSString *stateText = external ? (charging ? @"充电中" : @"已接通电源") : @"未接电源";
+    BOOL sysPause = [self boolFromConf:@"jy_sys_pause" fallback:NO];
+    NSString *stateText = external ? (charging ? @"充电中" : (sysPause ? @"系统暂停" : @"已接通电源")) : @"未接电源";
     // 电流优先用 Amperage（平滑值更稳、更准），缺失回退 InstantAmperage。
     NSNumber *ampObj = self.batInfo[@"Amperage"] ?: self.batInfo[@"InstantAmperage"];
     long long amp = [ampObj longLongValue];
@@ -762,6 +863,94 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
     NSDate *nowDay = [cal startOfDayForDate:now];
     NSInteger days = [cal components:NSCalendarUnitDay fromDate:refDay toDate:nowDay options:0].day;
     self.dayCountLabel.text = [NSString stringWithFormat:@"%ld", (long)days];
+}
+
+// 紧急补电：临时暂停温控 N 分钟，到点由 daemon 自动恢复（jy_urgent_until）。
+- (void)urgentTopUp:(UIButton *)sender {
+    NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+    NSInteger until = [self intFromConf:@"jy_urgent_until" fallback:0];
+    BOOL active = (until > 0 && (NSTimeInterval)until > now);
+    self.lastUserWriteTs = [NSDate timeIntervalSinceReferenceDate];
+    if (active) {
+        [self writeKey:@"jy_thermal_enabled" value:@YES];
+        [self writeKey:@"jy_urgent_until" value:@0];
+        [self.thermalSwitch setOn:YES animated:YES];
+        [self showStatus:@"已取消紧急补电，温控已恢复" ok:YES];
+    } else {
+        NSInteger target = (NSInteger)(now + 30 * 60);
+        [self writeKey:@"jy_thermal_enabled" value:@NO];
+        [self writeKey:@"jy_urgent_until" value:@(target)];
+        [self.thermalSwitch setOn:NO animated:YES];
+        [self showStatus:@"紧急补电 30 分钟：温控暂停，到点自动恢复" ok:YES];
+    }
+    [self updateUrgentButton];
+}
+
+- (void)updateUrgentButton {
+    NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+    NSInteger until = [self intFromConf:@"jy_urgent_until" fallback:0];
+    if (until > 0 && (NSTimeInterval)until > now) {
+        NSInteger remain = (NSInteger)((NSTimeInterval)until - now);
+        [self.urgentButton setTitle:[NSString stringWithFormat:@"紧急补电中 · 剩 %ld:%02ld（点按取消）",
+                                     (long)(remain / 60), (long)(remain % 60)]
+                           forState:UIControlStateNormal];
+        [self.urgentButton setTitleColor:CLColorRed() forState:UIControlStateNormal];
+    } else {
+        [self.urgentButton setTitle:@"紧急补电 30 分钟" forState:UIControlStateNormal];
+        [self.urgentButton setTitleColor:CLColorAmber() forState:UIControlStateNormal];
+    }
+}
+
+// 充电模式预设：护电 80%/起点30/duty40；均衡 85%/32/55；快充 100%/36/80。
+// 只写"推荐参数"，用户之后仍可手动拖动滑块覆盖。
+- (void)presetChanged:(UISegmentedControl *)sender {
+    int maxPct, riseLight, duty;
+    switch (sender.selectedSegmentIndex) {
+        case 0:  maxPct = 80;  riseLight = 30; duty = 40; break;   // 护电
+        case 2:  maxPct = 100; riseLight = 36; duty = 80; break;   // 快充
+        default: maxPct = 85;  riseLight = 32; duty = 55; break;   // 均衡
+    }
+    int riseMod   = riseLight + 4;
+    int fallLight = riseLight - 2;
+    int fallMod   = riseLight + 1;
+    int emerg     = riseLight + 9;
+    int resume    = MAX(20, maxPct - 5);
+
+    self.lastUserWriteTs = [NSDate timeIntervalSinceReferenceDate];
+    [self writeKey:@"jy_max_percent" value:@(maxPct)];
+    [self writeKey:@"charge_above" value:@(maxPct)];
+    [self writeKey:@"charge_below" value:@(resume)];
+    [self writeKey:@"jy_rise_light" value:@(riseLight)];
+    [self writeKey:@"jy_rise_moderate" value:@(riseMod)];
+    [self writeKey:@"jy_fall_light" value:@(fallLight)];
+    [self writeKey:@"jy_fall_moderate" value:@(fallMod)];
+    [self writeKey:@"jy_emergency" value:@(emerg)];
+    [self writeKey:@"jy_pwm_moderate_duty" value:@(duty)];
+
+    self.maxSlider.value = (float)maxPct;
+    self.startSlider.value = (float)riseLight;
+    [self updateMaxLabel];
+    [self updateStartLabel];
+    [self showStatus:[NSString stringWithFormat:@"%@：上限 %d%% · 起点 %d℃",
+                      [sender titleForSegmentAtIndex:sender.selectedSegmentIndex], maxPct, riseLight]
+                  ok:YES];
+}
+
+- (void)renderSession {
+    BOOL active = [self boolFromConf:@"jy_sess_active" fallback:NO];
+    NSInteger mins = [self intFromConf:@"jy_sess_min" fallback:0];
+    double peak = [self doubleFromConf:@"jy_sess_peak" fallback:0];
+    double avg = [self doubleFromConf:@"jy_sess_avg" fallback:0];
+    double mah = [self doubleFromConf:@"jy_sess_mah" fallback:0];
+    NSInteger cycles = [self intFromConf:@"jy_sess_cycles" fallback:0];
+
+    self.sessStateLabel.text = active
+        ? [NSString stringWithFormat:@"进行中 · %ld 分钟", (long)mins]
+        : @"上次会话";
+    self.sessPeakLabel.text  = [NSString stringWithFormat:@"峰值 %.1f℃", peak];
+    self.sessAvgLabel.text   = [NSString stringWithFormat:@"平均 %.1f℃", avg];
+    self.sessMahLabel.text   = [NSString stringWithFormat:@"充入 %.0fmAh", mah < 0 ? 0 : mah];
+    self.sessCyclesLabel.text = [NSString stringWithFormat:@"启停 %ld 次", (long)cycles];
 }
 
 - (void)renderLevel {
@@ -838,6 +1027,15 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
     NSInteger riseLight = [self intFromConf:@"jy_rise_light" fallback:35];
     self.startSlider.value = (float)MAX(30, MIN(40, riseLight));
     [self updateStartLabel];
+    [self updateUrgentButton];
+
+    // 预设高亮：只在参数完全匹配某个预设时选中，否则不高亮（避免误导）。
+    NSInteger presetIdx = UISegmentedControlNoSegment;
+    if (maxPercent == 80 && riseLight == 30) presetIdx = 0;
+    else if (maxPercent == 85 && riseLight == 32) presetIdx = 1;
+    else if (maxPercent == 100 && riseLight == 36) presetIdx = 2;
+    self.presetControl.selectedSegmentIndex = presetIdx;
+    [self renderSession];
 
     self.applyingRemoteValues = NO;
 }

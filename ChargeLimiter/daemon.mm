@@ -133,6 +133,20 @@ static NSTimer* g_jyThermalEvalTimer = nil;
 static NSTimer* g_jyPwmTimer = nil;
 static float g_jyLastDuty = 1.0f;   // PWM tick 最近一次占空比（供 ETA 用，避免重复调用有副作用的 pwmDuty）
 static BOOL g_jyPwmStopActive = NO; // 当前这次"停充"是否由软 PWM 发起（区别于紧急停充）
+static time_t g_pluggedSinceTs = 0; // 连续插电起始时间（长充保护）
+// 本次充电会话统计（只读展示，用于证明温控效果）
+static BOOL g_sessActive = NO;
+static time_t g_sessStartTs = 0;
+static double g_sessPeakTemp = 0;
+static double g_sessTempSum = 0;
+static int g_sessTempN = 0;
+static double g_sessStartMah = 0;
+static int g_sessPwmCycles = 0;
+static int g_sessLastMinutes = 0;
+static double g_sessLastPeak = 0;
+static double g_sessLastAvg = 0;
+static double g_sessLastMah = 0;
+static int g_sessLastCycles = 0;
 // P2 剩余充电时间估算（只读，不干预控制）：滑动窗口采样。
 static NSMutableArray* g_etaSamples = nil;    // @[ @{t, mah} ] 容量窗口（保留作交叉校验）
 static NSMutableArray* g_etaAmpSamples = nil;  // 充电相电流样本（mA）
@@ -243,6 +257,9 @@ static void evaluateFullChargeSchedule(BOOL forceApply);
 static void refreshBatteryStateAndApplyPolicy(void);
 static void clObserveOfflineAdvisory(NSDictionary* bat_info);
 static void updateChargeETA(void);   // P2 剩余充电时间（只读）
+static void checkUrgentTopUpExpiry(void);   // 紧急补电到期恢复温控
+static void sanitizeThermalThresholds(void); // 温控阈值合法性守卫
+static void updateChargeSession(void);       // 本次充电话 stats
 static void applyChargePolicy(NSDictionary* oldInfo, NSDictionary* info);
 static BOOL historyStatsEnabled(void);
 static BOOL hasPotentialExternalPowerSignal(NSDictionary* info);
@@ -4858,6 +4875,15 @@ static void refreshBatteryStateAndApplyPolicy(void) {
         return;
     }
     updateChargeETA();   // P2：剩余充电时间（只读，先于 g_enable 门，正常充电也估算）
+    checkUrgentTopUpExpiry();   // 紧急补电到期 → 自动恢复温控
+    sanitizeThermalThresholds(); // 阈值非法 → 重建（否则策略返回 -422，档位冻结）
+    // 长充计时：插电开始计时，拔电清零（长时保护据此旁路 PWM）。
+    if ([bat_info[@"ExternalConnected"] boolValue]) {
+        if (g_pluggedSinceTs == 0) g_pluggedSinceTs = time(0);
+    } else {
+        g_pluggedSinceTs = 0;
+    }
+    updateChargeSession();
     updateStatistics();
     if (!g_enable) {
         return;
@@ -4960,6 +4986,55 @@ static void updateChargeETA(void) {
     g_etaState = @"charging";
 }
 
+// 温控阈值合法性守卫：C 内核要求 fall_light < rise_light < fall_moderate
+// < rise_moderate < emergency。一旦被外部写成非法组合，策略会返回 -422、
+// 档位停止更新（表现为界面卡在"待机"）。这里发现非法就按 rise_light 重建
+// 一组安全值并记一条警告，保证策略永远可用。
+static void sanitizeThermalThresholds(void) {
+    int riseLight = getLocalInt(@"jy_rise_light", 30);
+    int riseMod   = getLocalInt(@"jy_rise_moderate", 34);
+    int fallLight = getLocalInt(@"jy_fall_light", 28);
+    int fallMod   = getLocalInt(@"jy_fall_moderate", 31);
+    int emerg     = getLocalInt(@"jy_emergency", 39);
+    if (riseLight < 20) riseLight = 20;
+    if (riseLight > 42) riseLight = 42;
+    BOOL ok = (fallLight < riseLight && riseLight < fallMod &&
+               fallMod < riseMod && riseMod < emerg);
+    if (ok) return;
+    fallLight = riseLight - 2;
+    fallMod   = riseLight + 1;
+    riseMod   = riseLight + 4;
+    emerg     = riseLight + 9;
+    setLocalInt(@"jy_rise_light", riseLight);
+    setLocalInt(@"jy_rise_moderate", riseMod);
+    setLocalInt(@"jy_fall_light", fallLight);
+    setLocalInt(@"jy_fall_moderate", fallMod);
+    setLocalInt(@"jy_emergency", emerg);
+    NSLog2(@"[Jy] thermal thresholds invalid -> repaired to %d/%d/%d/%d/%d",
+           fallLight, riseLight, fallMod, riseMod, emerg);
+    NSDateFormatter *df = [[NSDateFormatter alloc] init];
+    df.dateFormat = @"MM-dd HH:mm:ss";
+    [CLThermalGovernor appendLogLine:[NSString stringWithFormat:
+        @"%@ [warn] 温控阈值非法，已重建为 %d/%d/%d/%d/%d",
+        [df stringFromDate:[NSDate date]], fallLight, riseLight, fallMod, riseMod, emerg]];
+}
+
+// 紧急补电：用户临时关闭温控（jy_thermal_enabled=NO）并写入到期时间戳
+// （jy_urgent_until）。到期后自动恢复温控，避免用户忘记打开、长期裸充。
+static void checkUrgentTopUpExpiry(void) {
+    int until = getLocalInt(@"jy_urgent_until", 0);
+    if (until <= 0) return;
+    time_t now = time(0);
+    if (now < (time_t)until) return;
+    setLocalBool(@"jy_thermal_enabled", YES);
+    setLocalInt(@"jy_urgent_until", 0);
+    NSLog2(@"[Jy] urgent top-up expired -> thermal control restored");
+    NSDateFormatter *df = [[NSDateFormatter alloc] init];
+    df.dateFormat = @"MM-dd HH:mm:ss";
+    [CLThermalGovernor appendLogLine:[NSString stringWithFormat:
+        @"%@ [urgent] 紧急补电结束，温控已自动恢复", [df stringFromDate:[NSDate date]]]];
+}
+
 // 柔性温控入口（2026-10-18 用户授权接线）：
 // clObserveOfflineAdvisory -> CLThermalGovernor 温度闭环 -> notify 档位通道 ->
 // CLThermalSimTweak -> putDeviceInThermalSimulationMode -> PMIC 柔性降功率。
@@ -4984,6 +5059,42 @@ static void clObserveOfflineAdvisory(NSDictionary* bat_info) {
 // 软 PWM 柔性充电 tick（每 5s）：读 governor 占空比，把 g_jyThermalEmergencyStop +
 // setChargeStatus 当作"可变占空比开关"驱动。紧急(占空 0)归 emergencyHandler 全权，
 // 此处不动；满占空则清软停。PWM 周期按 jy_pwm_period_s（默认 60s）折算 tick 数。
+// 本次充电会话统计：温度峰值/均值、充入容量、PWM 启停次数。
+// 拔电时定格，供界面展示"温控到底做了什么"。
+static void updateChargeSession(void) {
+    NSDictionary *safe = bat_info ?: @{};
+    BOOL external = [safe[@"ExternalConnected"] boolValue];
+    double temp = [safe[@"Temperature"] doubleValue] / 100.0;
+    double mah = [safe[@"AppleRawCurrentCapacity"] doubleValue];
+
+    if (!external) {
+        if (g_sessActive) {
+            g_sessLastMinutes = (int)((time(0) - g_sessStartTs) / 60);
+            g_sessLastPeak = g_sessPeakTemp;
+            g_sessLastAvg = g_sessTempN ? (g_sessTempSum / g_sessTempN) : 0;
+            g_sessLastMah = mah > 0 ? (mah - g_sessStartMah) : 0;
+            g_sessLastCycles = g_sessPwmCycles;
+            g_sessActive = NO;
+        }
+        return;
+    }
+    if (!g_sessActive) {
+        g_sessActive = YES;
+        g_sessStartTs = time(0);
+        g_sessPeakTemp = temp;
+        g_sessTempSum = temp;
+        g_sessTempN = 1;
+        g_sessStartMah = mah;
+        g_sessPwmCycles = 0;
+        return;
+    }
+    if (temp > 0 && temp < 90) {
+        if (temp > g_sessPeakTemp) g_sessPeakTemp = temp;
+        g_sessTempSum += temp;
+        g_sessTempN++;
+    }
+}
+
 static void CLThermalPwmTick(void) {
     if (!g_enable) return;
     // bat_info 冻结看门狗：读取成功会刷新 g_lastBatInfoOkTs；超过 90s 未成功
@@ -5004,6 +5115,29 @@ static void CLThermalPwmTick(void) {
         }
     }
     CLThermalGovernor* governor = [CLThermalGovernor sharedGovernor];
+    // 长时充电保护：连续插电超过 jy_long_charge_hours（默认 8h）后旁路软 PWM。
+    // 此时电池多半已到上限或进入涓流，继续 PWM 只是无意义的启停；
+    // 39℃ 紧急停充仍由 emergencyHandler 独立生效。
+    int longHours = getLocalInt(@"jy_long_charge_hours", 8);
+    if (longHours > 0 && g_pluggedSinceTs > 0 &&
+        (time(0) - g_pluggedSinceTs) > (time_t)longHours * 3600) {
+        if (g_jyPwmStopActive) {
+            g_jyPwmStopActive = NO;
+            g_jyThermalEmergencyStop = NO;
+        }
+        static time_t lastLongLog = 0;
+        if (time(0) - lastLongLog > 3600) {
+            lastLongLog = time(0);
+            NSLog2(@"[Jy] long-charge bypass active (>%dh), PWM suspended", longHours);
+            NSDateFormatter *df = [[NSDateFormatter alloc] init];
+            df.dateFormat = @"MM-dd HH:mm:ss";
+            [CLThermalGovernor appendLogLine:[NSString stringWithFormat:
+                @"%@ [long] 连续插电超过 %dh，软 PWM 已暂停（紧急停充仍有效）",
+                [df stringFromDate:[NSDate date]], longHours]];
+        }
+        g_jyLastDuty = 1.0f;
+        return;
+    }
     // 让位：温控关闭 / 未接电源 / 容量到顶 / 紧急停充 → PWM 完全不写 IOKit。
     // 否则 pwmDuty=1.0 会被 tick 误解为"要充电"，主动 setChargeStatus(YES)，
     // 与容量停充打架（真机 2026-10-20：81% 上限仍充电）。
@@ -5049,14 +5183,27 @@ static void CLThermalPwmTick(void) {
     if (stop != g_jyThermalEmergencyStop) {
         g_jyThermalEmergencyStop = stop;
         g_jyPwmStopActive = stop;   // 记录这次停充归属 PWM
+        if (stop) g_sessPwmCycles++;   // 会话统计：一次启停计一拍
         setChargeStatus(!stop);
-        NSDateFormatter *f = [[NSDateFormatter alloc] init];
-        f.dateFormat = @"MM-dd HH:mm:ss";
-        NSString *ts = [f stringFromDate:[NSDate date]];
-        [CLThermalGovernor appendLogLine:[NSString stringWithFormat:
-            @"%@ [pwm] duty=%.1f%% -> %@", ts, duty * 100.0f,
-            stop ? @"STOP" : @"CHARGE"]];
-        NSLog(@"[Jy] soft-PWM duty=%.1f%% -> %@", duty * 100.0f, stop ? @"STOP" : @"CHARGE");
+        // 降噪：占空比变化 ≥5 个百分点、或距上次记录 ≥2 分钟才写一条。
+        // 逐周期记录会让 30 分钟充电产生上百行，排障反而不便。
+        static NSTimeInterval lastPwmLogTs = 0;
+        static float lastPwmLogDuty = -1.0f;
+        NSTimeInterval nowT = [[NSDate date] timeIntervalSince1970];
+        float diff = duty - lastPwmLogDuty;
+        if (diff < 0) diff = -diff;
+        BOOL worth = (lastPwmLogDuty < 0) || (diff >= 0.05f) || (nowT - lastPwmLogTs >= 120.0);
+        if (worth) {
+            lastPwmLogTs = nowT;
+            lastPwmLogDuty = duty;
+            NSDateFormatter *f = [[NSDateFormatter alloc] init];
+            f.dateFormat = @"MM-dd HH:mm:ss";
+            NSString *ts = [f stringFromDate:[NSDate date]];
+            [CLThermalGovernor appendLogLine:[NSString stringWithFormat:
+                @"%@ [pwm] duty=%.1f%% -> %@", ts, duty * 100.0f,
+                stop ? @"STOP" : @"CHARGE"]];
+            NSLog(@"[Jy] soft-PWM duty=%.1f%% -> %@", duty * 100.0f, stop ? @"STOP" : @"CHARGE");
+        }
     }
 }
 
@@ -5339,7 +5486,7 @@ static NSDictionary* CLMasterOffGateRequest(NSString* api, NSDictionary* nsreq) 
         allowedAPIs = [NSSet setWithArray:@[
             // 只读诊断
             @"get_conf", @"get_bat_info", @"get_mcl_diagnostics", @"get_statistics",
-            @"get_policy_events", @"get_diag", @"reload_conf",
+            @"get_policy_events", @"get_diag", @"reload_conf", @"status",
             // Jy's charge 运行日志（纯读取/清空本地日志文件，不触碰系统状态）
             @"jy_log", @"jy_log_clear", @"jy_hw",
             // 诊断：重启 thermalmonitord 以触发 dylib 注入（用户显式点按）
@@ -5427,7 +5574,46 @@ NSDictionary* handleReq(NSDictionary* nsreq) {
     if (masterGate != nil) {
         return masterGate;
     }
-    if ([api isEqualToString:@"get_conf"]) {
+    if ([api isEqualToString:@"status"]) {
+        // 只读状态快照（快捷指令/自动化）：不含任何写操作。
+        NSDictionary *govState = [[CLThermalGovernor sharedGovernor] stateSnapshot];
+        NSDictionary *safe = bat_info ?: @{};
+        NSMutableDictionary *d = [NSMutableDictionary dictionary];
+        d[@"temp_c"] = @([safe[@"Temperature"] doubleValue] / 100.0);
+        d[@"soc"] = safe[@"CurrentCapacity"] ?: @0;
+        d[@"charging"] = safe[@"IsCharging"] ?: @NO;
+        d[@"plugged"] = safe[@"ExternalConnected"] ?: @NO;
+        d[@"level"] = govState[@"level"] ?: @0;
+        d[@"duty"] = govState[@"pwm_duty"] ?: @1;
+        d[@"eta_min"] = @(g_etaMinutes);
+        d[@"eta_state"] = g_etaState ?: @"";
+        d[@"session_active"] = @(g_sessActive);
+        d[@"peak_c"] = @(g_sessActive ? g_sessPeakTemp : g_sessLastPeak);
+        d[@"cycles"] = @(g_sessActive ? g_sessPwmCycles : g_sessLastCycles);
+        return @{@"status": @0, @"data": d};
+    } else if ([api isEqualToString:@"preset"]) {
+        // 场景预设：name = eco | balanced | fast（缺省 balanced）。
+        // 直接写本地设置（绕过 set_conf 的主开关白名单），并让策略下一轮重算。
+        NSString *name = [nsreq[@"name"] isKindOfClass:[NSString class]] ? nsreq[@"name"] : @"balanced";
+        int maxPct, riseLight, duty;
+        if ([name isEqualToString:@"eco"])          { maxPct = 80;  riseLight = 30; duty = 40; }
+        else if ([name isEqualToString:@"fast"])    { maxPct = 100; riseLight = 36; duty = 80; }
+        else                                        { name = @"balanced"; maxPct = 85; riseLight = 32; duty = 55; }
+        int riseMod = riseLight + 4, fallLight = riseLight - 2, fallMod = riseLight + 1, emerg = riseLight + 9;
+        setLocalInt(@"jy_max_percent", maxPct);
+        setLocalInt(@"charge_above", maxPct);
+        setLocalInt(@"charge_below", MAX(20, maxPct - 5));
+        setLocalInt(@"jy_rise_light", riseLight);
+        setLocalInt(@"jy_rise_moderate", riseMod);
+        setLocalInt(@"jy_fall_light", fallLight);
+        setLocalInt(@"jy_fall_moderate", fallMod);
+        setLocalInt(@"jy_emergency", emerg);
+        setLocalInt(@"jy_pwm_moderate_duty", duty);
+        [[CLThermalGovernor sharedGovernor] resetPolicyState];
+        return @{@"status": @0,
+                 @"data": @{@"preset": name, @"max": @(maxPct),
+                            @"rise_light": @(riseLight), @"duty": @(duty)}};
+    } else if ([api isEqualToString:@"get_conf"]) {
         NSString* key = nsreq[@"key"];
         if (key == nil) {
             NSMutableDictionary* kv = [getAllKV() mutableCopy];
@@ -5452,6 +5638,31 @@ NSDictionary* handleReq(NSDictionary* nsreq) {
             kv[@"jy_gov_amp"] = govState[@"amp_ma"] ?: @0;
             kv[@"jy_gov_charging"] = govState[@"charging"] ?: @NO;
             kv[@"jy_gov_duty"] = govState[@"pwm_duty"] ?: @1;   // 供曲线图读取真实占空比
+            // 系统暂停充电识别：插着、没在充、又不是我们的容量停充
+            // → 多半是 iOS「优化电池充电」/系统温控在 hold，界面据此给出提示。
+            BOOL sysPause = [bat_info[@"ExternalConnected"] boolValue] &&
+                            ![bat_info[@"IsCharging"] boolValue] &&
+                            ![govState[@"capacity"] boolValue];
+            kv[@"jy_sys_pause"] = @(sysPause);
+            // 本次充电统计（插电中实时，拔电后保留上一次会话）
+            {
+                int sessMin = g_sessActive ? (int)((time(0) - g_sessStartTs) / 60) : g_sessLastMinutes;
+                double sessPeak = g_sessActive ? g_sessPeakTemp : g_sessLastPeak;
+                double sessAvg = g_sessActive ? (g_sessTempN ? g_sessTempSum / g_sessTempN : 0) : g_sessLastAvg;
+                double sessMah = 0;
+                if (g_sessActive) {
+                    sessMah = [bat_info[@"AppleRawCurrentCapacity"] doubleValue] - g_sessStartMah;
+                } else {
+                    sessMah = g_sessLastMah;
+                }
+                int sessCycles = g_sessActive ? g_sessPwmCycles : g_sessLastCycles;
+                kv[@"jy_sess_min"] = @(sessMin);
+                kv[@"jy_sess_peak"] = @(sessPeak);
+                kv[@"jy_sess_avg"] = @(sessAvg);
+                kv[@"jy_sess_mah"] = @(sessMah);
+                kv[@"jy_sess_cycles"] = @(sessCycles);
+                kv[@"jy_sess_active"] = @(g_sessActive);
+            }
             // P2 剩余充电时间（只读估算）：分钟数 + 状态 + 置信度。
             kv[@"jy_eta_min"] = @(g_etaMinutes);
             kv[@"jy_eta_state"] = g_etaState ?: @"unplugged";
@@ -5581,8 +5792,11 @@ NSDictionary* handleReq(NSDictionary* nsreq) {
             armDisableInflowRetryIfNeeded(bat_info, g_policyState, hasPotentialExternalPowerSignal(bat_info));
         } else if ([@[@"jy_rise_light", @"jy_rise_moderate", @"jy_emergency",
                       @"jy_fall_light", @"jy_fall_moderate"] containsObject:key]) {
-            // 用户改温控阈值：清掉策略内核的滞回/min_hold，下一轮立即按新阈值重算。
-            [[CLThermalGovernor sharedGovernor] resetPolicyState];
+            // 用户改温控阈值：强制下一轮重评估。
+            // 注意：不在这里重置 governor 的 advisory —— 那会在 HTTP 线程与主线程的
+            // evaluateBattery 之间制造竞争，且会让档位短暂归零（真机 2026-10-20 回归）。
+            // C 内核在 settings 变化时会自行 tp_init 重算，无需外部清空。
+            [[CLThermalGovernor sharedGovernor] resetPolicyState];  // 仅重置日志去重，不动 advisory
         } else if ([key isEqualToString:@"charge_above"]) {
             resetHoldSessionState();
             refreshHoldMonitorTimer();

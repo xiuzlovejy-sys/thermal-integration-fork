@@ -209,6 +209,21 @@ static double CLContinuousSeconds(void) {
                                                  ownership:@"ours"];
     NSDictionary *thermal = [envelope[@"thermal"] isKindOfClass:[NSDictionary class]]
                                 ? envelope[@"thermal"] : nil;
+    // 诊断：策略信封返回非 0 状态（配置无效/内核失败）时，thermal 会缺失、档位不会更新。
+    // 这是"界面卡在待机"最隐蔽的一种原因，必须显式暴露。
+    id statusObj = envelope[@"status"];
+    if ([statusObj respondsToSelector:@selector(integerValue)] && [statusObj integerValue] != 0) {
+        static double lastAdvisoryErrTs = 0;
+        double eNow = CLContinuousSeconds();
+        if (eNow - lastAdvisoryErrTs > 60) {
+            lastAdvisoryErrTs = eNow;
+            id err = envelope[@"error"] ?: @"?";
+            NSLog(@"[CLGovernor] advisory status=%ld error=%@", (long)[statusObj integerValue], err);
+            [CLThermalGovernor appendLogLine:[NSString stringWithFormat:
+                @"%@ [warn] advisory status=%ld error=%@", CLTimestamp(),
+                (long)[statusObj integerValue], err]];
+        }
+    }
     if (thermal == nil) return;
 
     // 容量到顶 latch：只做状态记账（UI/诊断展示"为什么停"），不作动。
@@ -389,9 +404,10 @@ static float CLDutyTarget(double effT) {
 
 - (void)resetPolicyState {
     @synchronized(self) {
-        // 丢弃 tp_policy 的 level/滞回/min_hold 状态；下一轮 evaluateBattery
-        // 会新建实例，按当前温度与新阈值重新判档（用户显式改阈值 = 允许立即跳档）。
-        self.advisory = nil;
+        // 只重置"日志去重"状态，让下一轮必然记录新档位。
+        // 绝不清 advisory：C 内核在 settings 变化时会自行 tp_init 重算档位；
+        // 从 HTTP 线程清空 advisory 会与主线程 evaluateBattery 竞争，
+        // 并让档位归零（真机 2026-10-20：改阈值后一直显示"待机"）。
         self.loggedLevel = -1;
         self.loggedAction = -1;
     }
