@@ -5579,6 +5579,10 @@ NSDictionary* handleReq(NSDictionary* nsreq) {
             resetBatteryStatus();
             refreshBatteryStateAndApplyPolicy();
             armDisableInflowRetryIfNeeded(bat_info, g_policyState, hasPotentialExternalPowerSignal(bat_info));
+        } else if ([@[@"jy_rise_light", @"jy_rise_moderate", @"jy_emergency",
+                      @"jy_fall_light", @"jy_fall_moderate"] containsObject:key]) {
+            // 用户改温控阈值：清掉策略内核的滞回/min_hold，下一轮立即按新阈值重算。
+            [[CLThermalGovernor sharedGovernor] resetPolicyState];
         } else if ([key isEqualToString:@"charge_above"]) {
             resetHoldSessionState();
             refreshHoldMonitorTimer();

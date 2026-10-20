@@ -387,6 +387,16 @@ static float CLDutyTarget(double effT) {
     return (float)(dutyMod - r * (dutyMod - dutyFloor));
 }
 
+- (void)resetPolicyState {
+    @synchronized(self) {
+        // 丢弃 tp_policy 的 level/滞回/min_hold 状态；下一轮 evaluateBattery
+        // 会新建实例，按当前温度与新阈值重新判档（用户显式改阈值 = 允许立即跳档）。
+        self.advisory = nil;
+        self.loggedLevel = -1;
+        self.loggedAction = -1;
+    }
+}
+
 - (BOOL)pwmShouldYield {
     @synchronized(self) {
         if (!getLocalBool(@"jy_thermal_enabled", YES)) return YES;   // 温控总开关关闭

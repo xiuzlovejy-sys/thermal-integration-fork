@@ -45,6 +45,9 @@ concurrency:
 
 jobs:
   repro:
+    # 硬超时：这是带 sanitizer 的压力测试，历史上出现过卡死一路撞到平台 6 小时上限。
+    # 正常 1–4 分钟即可完成；超过 15 分钟说明 repro 自身卡住，直接失败更快暴露问题。
+    timeout-minutes: 15
     # Apple Clang 不支持 TSan（-fsanitize=thread），GitHub macOS runner 用的是 Xcode clang，
     # 在 macos-* 上 run_repro.sh 的 build locked 阶段即失败（tee 吞退出码导致步骤假绿、
     # Gate 才报红）。Linux clang 完整支持 TSan，且 ubuntu runner 免费更快，故迁回 ubuntu-latest。

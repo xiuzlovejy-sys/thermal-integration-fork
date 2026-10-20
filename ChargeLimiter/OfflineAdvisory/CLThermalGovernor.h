@@ -43,6 +43,10 @@ typedef NS_ENUM(uint64_t, CLThermalLevel) {
 // 让位时 PWM 不得写 IOKit——否则会把 1.0 当成"充电"去和容量/紧急策略对抗。
 - (BOOL)pwmShouldYield;
 
+// 用户修改温控阈值后调用：丢弃策略内核的滞回/min_hold 状态，
+// 让下一轮按新阈值立即重算档位（否则会卡在旧档位的回落阈值上）。
+- (void)resetPolicyState;
+
 // 只读状态快照（get_conf 上报给 App）：level / stopped / emergency / capacity。
 // temp_c / amp_ma 为最近一次电池事件实测值——App 与日志据此判断"档位是否真的
 // 带来了电流变化"（柔性调控的唯一可观测证据，控制器本身不臆造效果）。
