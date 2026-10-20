@@ -190,6 +190,8 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
 @property (nonatomic, strong) UIButton *urgentButton;
 // 充电模式预设（护电/均衡/快充）
 @property (nonatomic, strong) UISegmentedControl *presetControl;
+// PWM 周期：顺滑优先(20s) / 少启停优先(60s)
+@property (nonatomic, strong) UISegmentedControl *periodControl;
 // 本次充电统计
 @property (nonatomic, strong) UILabel *sessStateLabel;
 @property (nonatomic, strong) UILabel *sessPeakLabel;
@@ -225,6 +227,7 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
 - (void)urgentTopUp:(UIButton *)sender;
 - (void)updateUrgentButton;
 - (void)presetChanged:(UISegmentedControl *)sender;
+- (void)periodChanged:(UISegmentedControl *)sender;
 - (void)renderSession;
 - (double)doubleFromConf:(NSString *)key fallback:(double)fallback;
 
@@ -432,6 +435,15 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
     [self.urgentButton addTarget:self action:@selector(urgentTopUp:) forControlEvents:UIControlEventTouchUpInside];
     [switchCard addSubview:self.urgentButton];
 
+    // 顺滑优先 / 少启停优先：只改 PWM 周期（20s / 60s），平均功率不变。
+    self.periodControl = [[UISegmentedControl alloc] initWithItems:@[@"顺滑优先", @"少启停优先"]];
+    self.periodControl.translatesAutoresizingMaskIntoConstraints = NO;
+    self.periodControl.selectedSegmentIndex = 0;
+    self.periodControl.selectedSegmentTintColor = CLColorTeal();
+    [self.periodControl addTarget:self action:@selector(periodChanged:)
+                 forControlEvents:UIControlEventValueChanged];
+    [switchCard addSubview:self.periodControl];
+
     [NSLayoutConstraint activateConstraints:@[
         [swTitle.topAnchor constraintEqualToAnchor:switchCard.topAnchor constant:18],
         [swTitle.leadingAnchor constraintEqualToAnchor:switchCard.leadingAnchor constant:20],
@@ -447,7 +459,12 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
         [self.urgentButton.topAnchor constraintEqualToAnchor:swDesc.bottomAnchor constant:10],
         [self.urgentButton.leadingAnchor constraintEqualToAnchor:swDesc.leadingAnchor],
         [self.urgentButton.heightAnchor constraintEqualToConstant:30],
-        [self.urgentButton.bottomAnchor constraintEqualToAnchor:switchCard.bottomAnchor constant:-16],
+
+        [self.periodControl.topAnchor constraintEqualToAnchor:self.urgentButton.bottomAnchor constant:10],
+        [self.periodControl.leadingAnchor constraintEqualToAnchor:swDesc.leadingAnchor],
+        [self.periodControl.trailingAnchor constraintEqualToAnchor:switchCard.trailingAnchor constant:-20],
+        [self.periodControl.heightAnchor constraintEqualToConstant:30],
+        [self.periodControl.bottomAnchor constraintEqualToAnchor:switchCard.bottomAnchor constant:-16],
     ]];
 
     // ---- 最大充电卡 ----
@@ -918,6 +935,7 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
 
     self.lastUserWriteTs = [NSDate timeIntervalSinceReferenceDate];
     [self writeKey:@"jy_max_percent" value:@(maxPct)];
+    [self writeKey:@"jy_resume_percent" value:@(resume)];
     [self writeKey:@"charge_above" value:@(maxPct)];
     [self writeKey:@"charge_below" value:@(resume)];
     [self writeKey:@"jy_rise_light" value:@(riseLight)];
@@ -953,15 +971,27 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
     self.sessCyclesLabel.text = [NSString stringWithFormat:@"启停 %ld 次", (long)cycles];
 }
 
+// PWM 周期切换：只影响启停频率，平均占空比不变。
+- (void)periodChanged:(UISegmentedControl *)sender {
+    NSInteger period = (sender.selectedSegmentIndex == 1) ? 60 : 20;
+    [self writeKey:@"jy_pwm_period_s" value:@(period)];
+    [self showStatus:(period == 60 ? @"少启停优先：60 秒周期" : @"顺滑优先：20 秒周期") ok:YES];
+}
+
 - (void)renderLevel {
     NSInteger level = [self intFromConf:@"jy_gov_level" fallback:0];
     BOOL stopped = [self boolFromConf:@"jy_gov_stopped" fallback:NO];
+    BOOL capLatched = [self boolFromConf:@"jy_gov_capacity" fallback:NO];
 
     NSString *text = @"待机";
     UIColor *color = CLColorSub();
     if (stopped) {
         text = @"紧急停充";
         color = CLColorRed();
+    } else if (capLatched) {
+        // 已达设定上限：充电任务完成，不再显示"限速档位"（温度关联对已停充无意义）。
+        text = @"已充满";
+        color = CLColorTeal();
     } else if (level >= 4) {
         text = @"重度限速";
         color = CLColorRed();
@@ -1001,12 +1031,20 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
     if (![self boolFromConf:@"enable" fallback:YES]) return;   // 主开关没开时写也没用
     NSInteger wanted = [self intFromConf:@"jy_max_percent" fallback:-1];
     if (wanted < 0) return;
-    NSInteger current = [self intFromConf:@"charge_above" fallback:80];
-    if (wanted == current) { self.capacitySynced = YES; return; }
     self.capacitySynced = YES;
-    [self writeKey:@"charge_above" value:@(wanted)];
-    [self writeKey:@"charge_below" value:@(MAX(20, wanted - 5))];
-    NSLog(@"[Jy] capacity keys re-synced: charge_above %ld -> %ld", (long)current, (long)wanted);
+
+    NSInteger current = [self intFromConf:@"charge_above" fallback:80];
+    if (wanted != current) {
+        [self writeKey:@"charge_above" value:@(wanted)];
+        [self writeKey:@"charge_below" value:@(MAX(20, wanted - 5))];
+        NSLog(@"[Jy] capacity keys re-synced: charge_above %ld -> %ld", (long)current, (long)wanted);
+    }
+    // 恢复线必须严格小于上限，否则策略内核整体返回 -422 → 档位冻结。
+    NSInteger wantResume = MIN(MAX(5, wanted - 5), MAX(5, wanted - 1));
+    NSInteger curResume = [self intFromConf:@"jy_resume_percent" fallback:-1];
+    if (curResume != wantResume) {
+        [self writeKey:@"jy_resume_percent" value:@(wantResume)];
+    }
 }
 
 - (void)renderSettings {
@@ -1035,6 +1073,10 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
     else if (maxPercent == 85 && riseLight == 32) presetIdx = 1;
     else if (maxPercent == 100 && riseLight == 36) presetIdx = 2;
     self.presetControl.selectedSegmentIndex = presetIdx;
+
+    // 周期档位回显：>=40s 视为"少启停优先"。
+    NSInteger pwmPeriod = [self intFromConf:@"jy_pwm_period_s" fallback:20];
+    self.periodControl.selectedSegmentIndex = (pwmPeriod >= 40) ? 1 : 0;
     [self renderSession];
 
     self.applyingRemoteValues = NO;
@@ -1109,6 +1151,9 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
     self.userEditing = NO;
     self.lastUserWriteTs = [NSDate timeIntervalSinceReferenceDate];
     [self writeKey:@"jy_max_percent" value:@(maxPercent)];
+    // jy_resume_percent 必须同步：策略内核要求 resume < max_percent，
+    // 不同步会让整个配置返回 -422、档位冻结（真机 2026-10-20）。
+    [self writeKey:@"jy_resume_percent" value:@(resume)];
     // 真正执行停充的是上游状态机：charge_above 到顶停、charge_below 回落恢复。
     [self writeKey:@"charge_above" value:@(maxPercent)];
     [self writeKey:@"charge_below" value:@(resume)];

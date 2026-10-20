@@ -170,6 +170,29 @@ static double CLContinuousSeconds(void) {
     };
 }
 
+// 兜底参数：用户设置非法（CLParse 返回 -422）时用它重算一轮。
+// 宁可回到产品默认值，也不让温控因一个坏键彻底冻结。
+- (NSDictionary *)defaultGovernorSettings {
+    return @{
+        @"thermal": @{
+            @"enabled": @YES,
+            @"rise_light": @30,
+            @"rise_moderate": @34,
+            @"fall_light": @28,
+            @"fall_moderate": @31,
+            @"emergency": @39,
+            @"min_hold_s": @60,
+            @"max_age_s": @15,
+        },
+        @"capacity": @{
+            @"enabled": @YES,
+            @"max_percent": @80,
+            @"resume_percent": @75,
+            @"max_age_s": @15,
+        },
+    };
+}
+
 - (void)evaluateBattery:(NSDictionary *)bat_info {
     NSNumber *tempCenti = [bat_info[@"Temperature"] isKindOfClass:[NSNumber class]]
                               ? bat_info[@"Temperature"] : nil;
@@ -207,23 +230,29 @@ static double CLContinuousSeconds(void) {
                                               monotonicNow:now
                                          monotonicSampleAt:@(now)
                                                  ownership:@"ours"];
-    NSDictionary *thermal = [envelope[@"thermal"] isKindOfClass:[NSDictionary class]]
-                                ? envelope[@"thermal"] : nil;
-    // 诊断：策略信封返回非 0 状态（配置无效/内核失败）时，thermal 会缺失、档位不会更新。
-    // 这是"界面卡在待机"最隐蔽的一种原因，必须显式暴露。
+    // 诊断 + 兜底：策略信封返回非 0（配置非法/内核失败）时，thermal 会缺失、
+    // 档位永不更新。此时用产品默认参数重算一轮——宁可回到默认值，
+    // 也不让温控因为一个坏键彻底冻结（真机 2026-10-20：resume >= max）。
     id statusObj = envelope[@"status"];
     if ([statusObj respondsToSelector:@selector(integerValue)] && [statusObj integerValue] != 0) {
         static double lastAdvisoryErrTs = 0;
         double eNow = CLContinuousSeconds();
-        if (eNow - lastAdvisoryErrTs > 60) {
+        if (eNow - lastAdvisoryErrTs > 600) {   // 10 分钟一次，避免刷屏
             lastAdvisoryErrTs = eNow;
             id err = envelope[@"error"] ?: @"?";
-            NSLog(@"[CLGovernor] advisory status=%ld error=%@", (long)[statusObj integerValue], err);
+            NSLog(@"[CLGovernor] advisory status=%ld error=%@ -> fallback",
+                  (long)[statusObj integerValue], err);
             [CLThermalGovernor appendLogLine:[NSString stringWithFormat:
-                @"%@ [warn] advisory status=%ld error=%@", CLTimestamp(),
-                (long)[statusObj integerValue], err]];
+                @"%@ [warn] 策略配置非法(%@)，已用默认参数兜底", CLTimestamp(), err]];
         }
+        envelope = [self.advisory observeBattery:bat_info
+                                        settings:[self defaultGovernorSettings]
+                                    monotonicNow:now
+                               monotonicSampleAt:@(now)
+                                       ownership:@"ours"];
     }
+    NSDictionary *thermal = [envelope[@"thermal"] isKindOfClass:[NSDictionary class]]
+                                ? envelope[@"thermal"] : nil;
     if (thermal == nil) return;
 
     // 容量到顶 latch：只做状态记账（UI/诊断展示"为什么停"），不作动。
@@ -324,10 +353,10 @@ static NSString *CLTimestamp(void) {
     BOOL changed = !self.hasLoggedOnce
                    || level != self.loggedLevel
                    || action != self.loggedAction;
-    // 只有"真的在做事"才写心跳：充电中，或处于非零档位（且未因容量到顶停充）。
-    // 拔线且档位归零后就不再产生新行；容量到顶停充后也停写——充电没进行、
-    // 温度不会因充电上升，每 30 秒重复同一行没有排障价值，只会白占空间。
-    BOOL meaningful = self.lastCharging || (level != 0 && !_capacityLatched);
+    // 只有"真的在做事"才写心跳：充电中，或处于非零档位（已接电源、未因容量到顶停充）。
+    // 拔线后即使档位尚未归零也不再写——避免"拔了充电器日志还在滚"。
+    BOOL meaningful = self.lastCharging ||
+                      (level != 0 && !_capacityLatched && _adapterConnected);
     BOOL heartbeat = meaningful && (now - self.lastLogTs) >= 30.0;
     if (!changed && !heartbeat) return;
     self.hasLoggedOnce = YES;

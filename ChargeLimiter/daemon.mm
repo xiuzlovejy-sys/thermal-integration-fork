@@ -15,6 +15,7 @@ int main(int argc, char** argv) {
 
 #include <sqlite3.h>
 #include <pthread.h>
+#include <os/lock.h>
 #include <unistd.h>
 #include <errno.h>
 #import <Foundation/Foundation.h>
@@ -148,7 +149,6 @@ static double g_sessLastAvg = 0;
 static double g_sessLastMah = 0;
 static int g_sessLastCycles = 0;
 // P2 剩余充电时间估算（只读，不干预控制）：滑动窗口采样。
-static NSMutableArray* g_etaSamples = nil;    // @[ @{t, mah} ] 容量窗口（保留作交叉校验）
 static NSMutableArray* g_etaAmpSamples = nil;  // 充电相电流样本（mA）
 static NSTimeInterval g_etaLastChargingTs = 0; // 最近一次"确实在充"的时间
 static NSString* g_etaState = @"unplugged";   // unplugged/paused/charging/at_target/estimating/no_data
@@ -259,6 +259,7 @@ static void clObserveOfflineAdvisory(NSDictionary* bat_info);
 static void updateChargeETA(void);   // P2 剩余充电时间（只读）
 static void checkUrgentTopUpExpiry(void);   // 紧急补电到期恢复温控
 static void sanitizeThermalThresholds(void); // 温控阈值合法性守卫
+static void sanitizeCapacitySettings(void);  // 容量阈值合法性守卫
 static void updateChargeSession(void);       // 本次充电话 stats
 static void applyChargePolicy(NSDictionary* oldInfo, NSDictionary* info);
 static BOOL historyStatsEnabled(void);
@@ -1048,18 +1049,24 @@ static kern_return_t setInflowStatusOverride(io_service_t serv, BOOL flag) {
 }
 
 static io_service_t g_iopmpsServ = IO_OBJECT_NULL;
+// 句柄缓存在主线程（PWM tick）与 HTTP 线程（getBatInfo）都会失效重置，
+// 无锁时两线程可能同时通过判空并各自 IOObjectRelease → over-release 崩溃。
+static os_unfair_lock g_iopmpsLock = OS_UNFAIR_LOCK_INIT;
 
 // 缓存失效：电池服务在"安装/注销/重枚举"后旧句柄会失效，而缓存若不清，
 // getBatInfo 会永久失败 → bat_info 冻结 → 温控与 UI 全部失联（真机 2026-10-20 事故）。
 static void invalidateIOPMPSServCache(void) {
+    os_unfair_lock_lock(&g_iopmpsLock);
     if (g_iopmpsServ != IO_OBJECT_NULL) {
         IOObjectRelease(g_iopmpsServ);
         g_iopmpsServ = IO_OBJECT_NULL;
     }
+    os_unfair_lock_unlock(&g_iopmpsLock);
 }
 
 static io_service_t getIOPMPSServ() {
-    if (g_iopmpsServ != IO_OBJECT_NULL) return g_iopmpsServ;
+    os_unfair_lock_lock(&g_iopmpsLock);
+    if (g_iopmpsServ == IO_OBJECT_NULL) {
     // 读路径必须用发布电池属性的 service（AppleSmartBattery / IOPMPowerSource）。
     // 切勿匹配 AppleSmartBatteryManager：它不发布 CurrentCapacity/Amperage，
     // 会导致 UI 电量全 0（真机 2026-08-02 探针已证实）。
@@ -1076,7 +1083,10 @@ static io_service_t getIOPMPSServ() {
         //      IOAccessoryTransport:IOAccessoryPowerSource:AppleARMPMUAccessoryPS
         g_use_smart = NO;
     }
-    return g_iopmpsServ;
+    }
+    io_service_t serv = g_iopmpsServ;
+    os_unfair_lock_unlock(&g_iopmpsLock);
+    return serv;
 }
 
 static NSDictionary* getBatSlimInfo(NSDictionary* info) {
@@ -3394,7 +3404,8 @@ static void releaseStaleInhibitAtBoot(void) {
 }
 
 static void performAcccharge(BOOL flag) {
-    static NSMutableDictionary* cache_status = nil;    BOOL acc_charge = getLocalBool(@"acc_charge", NO);
+    static NSMutableDictionary* cache_status = nil;
+    BOOL acc_charge = getLocalBool(@"acc_charge", NO);
     BOOL acc_charge_airmode = getLocalBool(@"acc_charge_airmode", NO);
     BOOL acc_charge_wifi = getLocalBool(@"acc_charge_wifi", NO);
     BOOL acc_charge_blue = getLocalBool(@"acc_charge_blue", NO);
@@ -4877,6 +4888,7 @@ static void refreshBatteryStateAndApplyPolicy(void) {
     updateChargeETA();   // P2：剩余充电时间（只读，先于 g_enable 门，正常充电也估算）
     checkUrgentTopUpExpiry();   // 紧急补电到期 → 自动恢复温控
     sanitizeThermalThresholds(); // 阈值非法 → 重建（否则策略返回 -422，档位冻结）
+    sanitizeCapacitySettings();  // 容量恢复线越界 → 同样会让策略 -422
     // 长充计时：插电开始计时，拔电清零（长时保护据此旁路 PWM）。
     if ([bat_info[@"ExternalConnected"] boolValue]) {
         if (g_pluggedSinceTs == 0) g_pluggedSinceTs = time(0);
@@ -4924,9 +4936,7 @@ static void updateChargeETA(void) {
     NSInteger targetPct = getLocalInt(@"jy_max_percent", 80);
 
     if (!external || rawCurObj == nil || rawMaxObj == nil) {
-        if (g_etaSamples == nil) g_etaSamples = [NSMutableArray array];
         if (g_etaAmpSamples == nil) g_etaAmpSamples = [NSMutableArray array];
-        [g_etaSamples removeAllObjects];
         [g_etaAmpSamples removeAllObjects];
         g_etaMinutes = -1;
         g_etaLastChargingTs = 0;
@@ -4984,6 +4994,30 @@ static void updateChargeETA(void) {
     // 高 SOC 段电流会继续 taper，ETA 天然偏低；降置信度提示。
     g_etaConfidence = (socPct > 80 || g_etaAmpSamples.count < 4) ? @"medium" : @"high";
     g_etaState = @"charging";
+}
+
+// 容量阈值守卫：策略内核要求 resume_percent < max_percent。App 只改上限、
+// 没同步恢复线时（history 遗留），整个策略返回 -422，档位与温控全部冻结
+// （真机 2026-10-20：上限 64、恢复线仍 75）。这里发现越界就按上限重建。
+static void sanitizeCapacitySettings(void) {
+    int maxPct = getLocalInt(@"jy_max_percent", 80);
+    int resume = getLocalInt(@"jy_resume_percent", 75);
+    BOOL changed = NO;
+    if (maxPct < 6)   { maxPct = 6;   changed = YES; }
+    if (maxPct > 100) { maxPct = 100; changed = YES; }
+    if (resume >= maxPct) {
+        resume = MAX(5, maxPct - 5);
+        changed = YES;
+    }
+    if (!changed) return;
+    setLocalInt(@"jy_max_percent", maxPct);
+    setLocalInt(@"jy_resume_percent", resume);
+    NSLog2(@"[Jy] capacity thresholds invalid -> repaired max=%d resume=%d", maxPct, resume);
+    NSDateFormatter *df = [[NSDateFormatter alloc] init];
+    df.dateFormat = @"MM-dd HH:mm:ss";
+    [CLThermalGovernor appendLogLine:[NSString stringWithFormat:
+        @"%@ [warn] 容量阈值非法，已重建为 上限 %d%% / 恢复 %d%%",
+        [df stringFromDate:[NSDate date]], maxPct, resume]];
 }
 
 // 温控阈值合法性守卫：C 内核要求 fall_light < rise_light < fall_moderate
