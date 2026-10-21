@@ -633,16 +633,14 @@ if [ "$BUILD_NATIVE_ROOTHIDE" = "1" ]; then
   cp -p "$ROOT_DIR/packaging/Icon.png" "$ROOT_DIR/packaging/Icon@2x.png" "$STAGE_ROOTHIDE_DIR/Applications/ChargeLimiter.app/"
   stage_tweak_files "$STAGE_ROOTHIDE_DIR" "$TWEAK_STAGE_DIR/$TWEAK_NAME-arm64e.dylib"
   # --- 集成「锁屏充电胶囊」：把 patched Jikan 合并进本包 ---
-  # 只合并渲染与设置资源（dylib / 过滤 plist / PreferenceBundle / 本地化）；
+  # 只合并渲染所需资源（dylib / 过滤 plist / 本地化）；设置入口在 App 内，不打 PreferenceBundle。
   # 不含 JikanPowerd（我们用外部 ETA，不需要输入功率采样）。
   # 源目录由 CI 传入（已 dpkg-deb -x 解包）。
   if [ -n "${JIKAN_BUNDLE_DIR:-}" ] && [ -d "${JIKAN_BUNDLE_DIR}" ]; then
     echo "[7/10] Bundle Jikan lock-screen capsule..."
     jikan_dylib=$(find "$JIKAN_BUNDLE_DIR" -name 'Jikan.dylib' -type f | head -1)
     jikan_filter=$(find "$JIKAN_BUNDLE_DIR" -name 'Jikan.plist' -type f | head -1)
-    jikan_prefs=$(find "$JIKAN_BUNDLE_DIR" -name 'JikanPreferences.bundle' -type d | head -1)
     jikan_l10n=$(find "$JIKAN_BUNDLE_DIR" -type d -path '*Tweak Support/Jikan' | head -1)
-    jikan_plist=$(find "$JIKAN_BUNDLE_DIR" -name 'JikanPreferences.plist' -type f | head -1)
     if [ -z "$jikan_dylib" ] || [ -z "$jikan_filter" ]; then
       echo "[ERR] JIKAN_BUNDLE_DIR set but Jikan.dylib / Jikan.plist missing" >&2
       exit 1
@@ -650,18 +648,10 @@ if [ "$BUILD_NATIVE_ROOTHIDE" = "1" ]; then
     mkdir -p "$STAGE_ROOTHIDE_DIR/Library/MobileSubstrate/DynamicLibraries"
     cp -p "$jikan_dylib" "$STAGE_ROOTHIDE_DIR/Library/MobileSubstrate/DynamicLibraries/Jikan.dylib"
     cp -p "$jikan_filter" "$STAGE_ROOTHIDE_DIR/Library/MobileSubstrate/DynamicLibraries/Jikan.plist"
-    if [ -n "$jikan_prefs" ]; then
-      mkdir -p "$STAGE_ROOTHIDE_DIR/Library/PreferenceBundles"
-      cp -a "$jikan_prefs" "$STAGE_ROOTHIDE_DIR/Library/PreferenceBundles/"
-    fi
     if [ -n "$jikan_l10n" ]; then
       mkdir -p "$STAGE_ROOTHIDE_DIR/Library/Tweak Support"
       rm -rf "$STAGE_ROOTHIDE_DIR/Library/Tweak Support/Jikan"
       cp -a "$jikan_l10n" "$STAGE_ROOTHIDE_DIR/Library/Tweak Support/Jikan"
-    fi
-    if [ -n "$jikan_plist" ]; then
-      mkdir -p "$STAGE_ROOTHIDE_DIR/Library/PreferenceLoader/Preferences"
-      cp -p "$jikan_plist" "$STAGE_ROOTHIDE_DIR/Library/PreferenceLoader/Preferences/JikanPreferences.plist"
     fi
     echo "[7/10] Jikan bundled."
   else

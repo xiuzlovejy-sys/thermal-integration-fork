@@ -5683,6 +5683,7 @@ static NSDictionary* CLMasterOffGateRequest(NSString* api, NSDictionary* nsreq) 
             // 只读诊断
             @"get_conf", @"get_bat_info", @"get_mcl_diagnostics", @"get_statistics",
             @"get_policy_events", @"get_diag", @"reload_conf", @"status",
+            @"jikan_get", @"jikan_set",
             // Jy's charge 运行日志（纯读取/清空本地日志文件，不触碰系统状态）
             @"jy_log", @"jy_log_clear", @"jy_hw",
             // 诊断：重启 thermalmonitord 以触发 dylib 注入（用户显式点按）
@@ -5763,9 +5764,42 @@ static void JYAppendValue(NSMutableString *out, id v, int depth) {
 
 // 把当前上限同步到胶囊（Jikan）偏好；RootHide 需按 .jbroot 解析路径。
 // api=jikan_sync 与 set_conf(jy_max_percent) 共用，避免两套逻辑漂移。
+// Jikan（胶囊）偏好文件路径：数据分区，但 RootHide 下仍要兼容 .jbroot 布局。
+static NSString* CLJikanPrefsPath(void) {
+    NSString *jbRoot = CLDaemonJbRootPath() ?: @"";
+    NSString *rel = @"/var/mobile/Library/Preferences/moe.waru.jikan.preferences.plist";
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSMutableArray<NSString *> *cands = [NSMutableArray array];
+    if (jbRoot.length > 0) [cands addObject:[jbRoot stringByAppendingString:rel]];
+    [cands addObject:rel];
+    [cands addObject:[@"/var/jb" stringByAppendingString:rel]];
+    for (NSString *c in cands) {
+        if ([fm fileExistsAtPath:c]) return c;
+    }
+    return cands.firstObject ?: rel;
+}
+
+// 写一个键并让胶囊立即重载；归 mobile 所有，否则 Jikan 自己改设置会失败。
+static BOOL CLJikanSetValue(NSString *key, id val) {
+    if (key.length == 0) return NO;
+    NSString *path = CLJikanPrefsPath();
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSMutableDictionary *prefs = [[NSDictionary dictionaryWithContentsOfFile:path] mutableCopy];
+    if (prefs == nil) prefs = [NSMutableDictionary dictionary];
+    prefs[key] = val;
+    [fm createDirectoryAtPath:[path stringByDeletingLastPathComponent]
+  withIntermediateDirectories:YES attributes:nil error:nil];
+    if (![prefs writeToFile:path atomically:YES]) return NO;
+    chown(path.fileSystemRepresentation, 501, 501);
+    chmod(path.fileSystemRepresentation, 0644);
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                         CFSTR("moe.waru.jikan.preferences.reload"),
+                                         NULL, NULL, true);
+    return YES;
+}
+
 static NSDictionary* CLJikanSyncNow(void) {
-    // 检测并同步目标到 Jikan。RootHide 的库不在 /var/jb，也不在根路径，
-    // 而是位于 .jbroot-XXXX 下，所以三个根都要试（App 侧无法可靠判断）。
+    // 检测是否装着胶囊（三个根都试，RootHide 在 .jbroot 下）。
     NSString *jbRoot = CLDaemonJbRootPath() ?: @"";
     NSFileManager *fm = [NSFileManager defaultManager];
     NSArray<NSString *> *probes = @[
@@ -5784,17 +5818,6 @@ static NSDictionary* CLJikanSyncNow(void) {
         if (found) break;
     }
 
-    NSString *prefsRel = @"/var/mobile/Library/Preferences/moe.waru.jikan.preferences.plist";
-    NSMutableArray<NSString *> *prefCands = [NSMutableArray array];
-    if (jbRoot.length > 0) [prefCands addObject:[jbRoot stringByAppendingString:prefsRel]];
-    [prefCands addObject:prefsRel];
-    [prefCands addObject:[@"/var/jb" stringByAppendingString:prefsRel]];
-    NSString *prefsPath = nil;
-    for (NSString *c in prefCands) {
-        if ([fm fileExistsAtPath:c]) { prefsPath = c; break; }
-    }
-    if (prefsPath == nil) prefsPath = prefCands.firstObject;
-
     int maxPct = getLocalInt(@"jy_max_percent", 80);
     int apple = 80;
     if (maxPct >= 98)      apple = 100;
@@ -5802,25 +5825,13 @@ static NSDictionary* CLJikanSyncNow(void) {
     else if (maxPct >= 88) apple = 90;
     else if (maxPct >= 83) apple = 85;
 
-    NSMutableDictionary *prefs = [[NSDictionary dictionaryWithContentsOfFile:prefsPath] mutableCopy];
-    if (prefs == nil) prefs = [NSMutableDictionary dictionary];
-    prefs[@"batteryEstimateTargetPercent"] = @(maxPct);
-    prefs[@"batteryEstimateAppleTargetPercent"] = @(apple);
-    [fm createDirectoryAtPath:[prefsPath stringByDeletingLastPathComponent]
-  withIntermediateDirectories:YES attributes:nil error:nil];
-    BOOL wrote = [prefs writeToFile:prefsPath atomically:YES];
-    if (wrote) {
-        // 偏好文件归 mobile 所有，否则 Jikan（以 mobile 运行）自己改设置会失败。
-        chown(prefsPath.fileSystemRepresentation, 501, 501);
-        chmod(prefsPath.fileSystemRepresentation, 0644);
-        CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
-                                             CFSTR("moe.waru.jikan.preferences.reload"),
-                                             NULL, NULL, true);
-    }
+    BOOL ok1 = CLJikanSetValue(@"batteryEstimateTargetPercent", @(maxPct));
+    BOOL ok2 = CLJikanSetValue(@"batteryEstimateAppleTargetPercent", @(apple));
+    BOOL wrote = (ok1 && ok2);
     return @{ @"status": @(wrote ? 0 : -1),
               @"data": @{ @"installed": @(found != nil),
                           @"found": found ?: @"",
-                          @"prefs_path": prefsPath ?: @"",
+                          @"prefs_path": CLJikanPrefsPath() ?: @"",
                           @"wrote": @(wrote),
                           @"max": @(maxPct),
                           @"jbroot": jbRoot } };
@@ -5876,6 +5887,13 @@ NSDictionary* handleReq(NSDictionary* nsreq) {
                             @"rise_light": @(riseLight), @"duty": @(duty)}};
     } else if ([api isEqualToString:@"jikan_sync"]) {
         return CLJikanSyncNow();
+    } else if ([api isEqualToString:@"jikan_get"]) {
+        NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:CLJikanPrefsPath()] ?: @{};
+        return @{ @"status": @0, @"data": prefs };
+    } else if ([api isEqualToString:@"jikan_set"]) {
+        NSString *key = nsreq[@"key"];
+        BOOL ok = CLJikanSetValue(key, nsreq[@"val"]);
+        return @{ @"status": @(ok ? 0 : -1), @"data": @{ @"key": key ?: @"" } };
     } else if ([api isEqualToString:@"get_conf"]) {
         NSString* key = nsreq[@"key"];
         if (key == nil) {

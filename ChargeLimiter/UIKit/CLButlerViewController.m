@@ -11,6 +11,7 @@
 
 #import "CLButlerViewController.h"
 #import "CLAPIClient.h"
+#import <objc/runtime.h>
 
 // ---- 配色（暗色科技感）----
 static UIColor *CLColorBG(void)      { return [UIColor colorWithRed:0.043 green:0.071 blue:0.125 alpha:1.0]; }
@@ -208,6 +209,9 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
 // 充电记录
 @property (nonatomic, strong) UIStackView *historyStack;
 @property (nonatomic, assign) NSTimeInterval historyLastTs;
+// 锁屏胶囊
+@property (nonatomic, strong) UISwitch *capsuleSwitch;
+@property (nonatomic, assign) NSTimeInterval capsuleLastTs;
 // 周期满充校准（上游 full_charge_sched_*，仅暴露 UI）
 @property (nonatomic, strong) UISwitch *fullChargeSwitch;
 @property (nonatomic, strong) UISegmentedControl *fullChargeInterval;
@@ -253,9 +257,14 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
 - (void)fullChargeDurationChanged:(UISlider *)sender;
 - (void)commitFullChargeDuration;
 - (void)renderFullChargeSchedule;
+- (void)capsuleToggled:(UISwitch *)sender;
+- (void)openCapsuleSettings:(UIButton *)sender;
+- (void)loadCapsuleState;
 - (double)doubleFromConf:(NSString *)key fallback:(double)fallback;
 
 @end
+
+static UIViewController *CLMakeJikanSettingsVC(void);
 
 @implementation CLButlerViewController
 
@@ -762,6 +771,46 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
         [self.fullChargeDurationSlider.bottomAnchor constraintEqualToAnchor:fcCard.bottomAnchor constant:-18],
     ]];
 
+    // ---- 锁屏充电胶囊 ----
+    UIView *capCard = [self card];
+    [stack addArrangedSubview:capCard];
+    UILabel *capTitle = [self label:@"锁屏充电胶囊" size:16 weight:UIFontWeightMedium color:CLColorText()];
+    self.capsuleSwitch = [[UISwitch alloc] init];
+    self.capsuleSwitch.translatesAutoresizingMaskIntoConstraints = NO;
+    self.capsuleSwitch.onTintColor = CLColorTeal();
+    [self.capsuleSwitch addTarget:self action:@selector(capsuleToggled:)
+                 forControlEvents:UIControlEventValueChanged];
+    UILabel *capDesc = [self label:@"在锁屏显示充电剩余时间与进度" size:12 weight:UIFontWeightRegular color:CLColorSub()];
+    capDesc.numberOfLines = 0;
+    UIButton *capDetail = [UIButton buttonWithType:UIButtonTypeSystem];
+    capDetail.translatesAutoresizingMaskIntoConstraints = NO;
+    [capDetail setTitle:@"详细设置 ›" forState:UIControlStateNormal];
+    capDetail.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
+    [capDetail setTitleColor:CLColorTeal() forState:UIControlStateNormal];
+    [capDetail addTarget:self action:@selector(openCapsuleSettings:)
+        forControlEvents:UIControlEventTouchUpInside];
+    [self attachPressAnimation:capDetail];
+
+    for (UIView *v in @[capTitle, self.capsuleSwitch, capDesc, capDetail]) {
+        [capCard addSubview:v];
+    }
+    [NSLayoutConstraint activateConstraints:@[
+        [capTitle.topAnchor constraintEqualToAnchor:capCard.topAnchor constant:18],
+        [capTitle.leadingAnchor constraintEqualToAnchor:capCard.leadingAnchor constant:20],
+        [capTitle.trailingAnchor constraintLessThanOrEqualToAnchor:self.capsuleSwitch.leadingAnchor constant:-12],
+        [self.capsuleSwitch.centerYAnchor constraintEqualToAnchor:capTitle.centerYAnchor],
+        [self.capsuleSwitch.trailingAnchor constraintEqualToAnchor:capCard.trailingAnchor constant:-18],
+
+        [capDesc.topAnchor constraintEqualToAnchor:capTitle.bottomAnchor constant:6],
+        [capDesc.leadingAnchor constraintEqualToAnchor:capTitle.leadingAnchor],
+        [capDesc.trailingAnchor constraintEqualToAnchor:capCard.trailingAnchor constant:-20],
+
+        [capDetail.topAnchor constraintEqualToAnchor:capDesc.bottomAnchor constant:10],
+        [capDetail.leadingAnchor constraintEqualToAnchor:capTitle.leadingAnchor],
+        [capDetail.heightAnchor constraintEqualToConstant:30],
+        [capDetail.bottomAnchor constraintEqualToAnchor:capCard.bottomAnchor constant:-12],
+    ]];
+
     // ---- 充电记录（最近 6 次会话，仅本地）----
     UIView *histCard = [self card];
     [stack addArrangedSubview:histCard];
@@ -936,6 +985,7 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
             [weakSelf renderSettings];
             [weakSelf renderLevel];
             [weakSelf loadHistory];   // 20 秒节流，内部判断
+            [weakSelf loadCapsuleState];
         }
     }];
 }
@@ -1206,6 +1256,36 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
     NSInteger hours = [self intFromConf:@"full_charge_sched_duration_hours" fallback:3];
     self.fullChargeDurationSlider.value = (float)hours;
     self.fullChargeDurationLabel.text = [NSString stringWithFormat:@"持续 %ld 小时", (long)hours];
+}
+
+- (void)capsuleToggled:(UISwitch *)sender {
+    [[CLAPIClient shared] sendRequest:@{ @"api": @"jikan_set",
+                                         @"key": @"enabled",
+                                         @"val": @(sender.isOn) } completion:nil];
+    [self showStatus:(sender.isOn ? @"已开启锁屏胶囊" : @"已关闭锁屏胶囊") ok:YES];
+}
+
+- (void)openCapsuleSettings:(UIButton *)sender {
+    UIViewController *vc = CLMakeJikanSettingsVC();
+    UINavigationController *nav = [[UINavigationController alloc] initWithRootViewController:vc];
+    nav.navigationBar.barStyle = UIBarStyleBlack;
+    nav.navigationBar.tintColor = CLColorTeal();
+    [self presentViewController:nav animated:YES completion:nil];
+}
+
+- (void)loadCapsuleState {
+    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+    if (now - self.capsuleLastTs < 15.0) return;
+    self.capsuleLastTs = now;
+    __weak typeof(self) weakSelf = self;
+    [[CLAPIClient shared] sendRequest:@{ @"api": @"jikan_get" }
+                          completion:^(NSDictionary *response, NSError *error) {
+        NSDictionary *prefs = [response[@"data"] isKindOfClass:[NSDictionary class]]
+                                  ? response[@"data"] : nil;
+        if (prefs == nil) return;
+        BOOL on = prefs[@"enabled"] != nil ? [prefs[@"enabled"] boolValue] : YES;
+        [weakSelf.capsuleSwitch setOn:on animated:NO];
+    }];
 }
 
 - (void)renderSession {
@@ -1589,3 +1669,255 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
 }
 
 @end
+
+
+#pragma mark - 锁屏充电胶囊（Jikan 偏好）
+
+static const void *CLJikanKeyAssoc = &CLJikanKeyAssoc;
+static const void *CLJikanValuesAssoc = &CLJikanValuesAssoc;
+
+static UILabel *CLJikanLabel(NSString *text, CGFloat size, UIFontWeight weight, UIColor *color) {
+    UILabel *l = [[UILabel alloc] init];
+    l.text = text;
+    l.font = [UIFont systemFontOfSize:size weight:weight];
+    l.textColor = color;
+    l.translatesAutoresizingMaskIntoConstraints = NO;
+    return l;
+}
+
+@interface CLJikanSettingsViewController : UIViewController
+@property (nonatomic, strong) UIScrollView *scroll;
+@property (nonatomic, strong) UIStackView *content;
+@property (nonatomic, strong) NSDictionary *prefs;
+@end
+
+@implementation CLJikanSettingsViewController
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = @"锁屏胶囊";
+    self.view.backgroundColor = CLColorBG();
+    self.navigationItem.rightBarButtonItem =
+        [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone
+                                                      target:self action:@selector(close)];
+
+    self.scroll = [[UIScrollView alloc] init];
+    self.scroll.translatesAutoresizingMaskIntoConstraints = NO;
+    self.scroll.alwaysBounceVertical = YES;
+    [self.view addSubview:self.scroll];
+
+    self.content = [[UIStackView alloc] init];
+    self.content.axis = UILayoutConstraintAxisVertical;
+    self.content.spacing = 12;
+    self.content.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.scroll addSubview:self.content];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [self.scroll.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor],
+        [self.scroll.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+        [self.scroll.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+        [self.scroll.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
+        [self.content.topAnchor constraintEqualToAnchor:self.scroll.topAnchor constant:16],
+        [self.content.leadingAnchor constraintEqualToAnchor:self.scroll.leadingAnchor constant:16],
+        [self.content.trailingAnchor constraintEqualToAnchor:self.scroll.trailingAnchor constant:-16],
+        [self.content.bottomAnchor constraintEqualToAnchor:self.scroll.bottomAnchor constant:-24],
+        [self.content.widthAnchor constraintEqualToAnchor:self.scroll.widthAnchor constant:-32],
+    ]];
+    [self load];
+}
+
+- (void)close { [self dismissViewControllerAnimated:YES completion:nil]; }
+
+- (void)load {
+    __weak typeof(self) weakSelf = self;
+    [[CLAPIClient shared] sendRequest:@{ @"api": @"jikan_get" } completion:^(NSDictionary *response, NSError *error) {
+        __strong typeof(weakSelf) self = weakSelf;
+        if (self == nil) return;
+        self.prefs = [response[@"data"] isKindOfClass:[NSDictionary class]] ? response[@"data"] : @{};
+        [self buildUI];
+    }];
+}
+
+- (BOOL)boolForKey:(NSString *)key def:(BOOL)def {
+    id v = self.prefs[key];
+    return v != nil ? [v boolValue] : def;
+}
+
+- (double)doubleForKey:(NSString *)key def:(double)def {
+    id v = self.prefs[key];
+    return v != nil ? [v doubleValue] : def;
+}
+
+- (void)setKey:(NSString *)key value:(id)value {
+    if (key.length == 0 || value == nil) return;
+    NSMutableDictionary *m = self.prefs ? [self.prefs mutableCopy] : [NSMutableDictionary dictionary];
+    m[key] = value;
+    self.prefs = m;
+    [[CLAPIClient shared] sendRequest:@{ @"api": @"jikan_set", @"key": key, @"val": value } completion:nil];
+}
+
+#pragma mark 行构造
+
+- (UIView *)rowWithTitle:(NSString *)title control:(UIView *)control {
+    UIView *row = [[UIView alloc] init];
+    row.translatesAutoresizingMaskIntoConstraints = NO;
+    UILabel *lab = CLJikanLabel(title, 13, UIFontWeightRegular, CLColorText());
+    control.translatesAutoresizingMaskIntoConstraints = NO;
+    [row addSubview:lab];
+    [row addSubview:control];
+    [NSLayoutConstraint activateConstraints:@[
+        [row.heightAnchor constraintGreaterThanOrEqualToConstant:44],
+        [lab.leadingAnchor constraintEqualToAnchor:row.leadingAnchor constant:16],
+        [lab.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
+        [control.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
+        [control.trailingAnchor constraintEqualToAnchor:row.trailingAnchor constant:-16],
+        [lab.trailingAnchor constraintLessThanOrEqualToAnchor:control.leadingAnchor constant:-12],
+    ]];
+    return row;
+}
+
+- (UIView *)cardWithRows:(NSArray<UIView *> *)rows {
+    UIView *card = [[UIView alloc] init];
+    card.backgroundColor = CLColorCard();
+    card.layer.cornerRadius = 16;
+    card.translatesAutoresizingMaskIntoConstraints = NO;
+    UIStackView *sv = [[UIStackView alloc] initWithArrangedSubviews:rows];
+    sv.axis = UILayoutConstraintAxisVertical;
+    sv.translatesAutoresizingMaskIntoConstraints = NO;
+    [card addSubview:sv];
+    [NSLayoutConstraint activateConstraints:@[
+        [sv.topAnchor constraintEqualToAnchor:card.topAnchor constant:4],
+        [sv.bottomAnchor constraintEqualToAnchor:card.bottomAnchor constant:-4],
+        [sv.leadingAnchor constraintEqualToAnchor:card.leadingAnchor],
+        [sv.trailingAnchor constraintEqualToAnchor:card.trailingAnchor],
+    ]];
+    return card;
+}
+
+- (UIView *)switchRow:(NSString *)title key:(NSString *)key def:(BOOL)def {
+    UISwitch *sw = [[UISwitch alloc] init];
+    sw.onTintColor = CLColorTeal();
+    sw.on = [self boolForKey:key def:def];
+    objc_setAssociatedObject(sw, CLJikanKeyAssoc, key, OBJC_ASSOCIATION_COPY_NONATOMIC);
+    [sw addTarget:self action:@selector(switchChanged:) forControlEvents:UIControlEventValueChanged];
+    return [self rowWithTitle:title control:sw];
+}
+
+- (UIView *)sliderRow:(NSString *)title key:(NSString *)key def:(double)def {
+    UISlider *sl = [[UISlider alloc] init];
+    sl.minimumValue = 0;
+    sl.maximumValue = 100;
+    sl.value = (float)[self doubleForKey:key def:def];
+    sl.minimumTrackTintColor = CLColorTeal();
+    sl.maximumTrackTintColor = [UIColor colorWithWhite:1.0 alpha:0.12];
+    [sl.widthAnchor constraintEqualToConstant:150].active = YES;
+    objc_setAssociatedObject(sl, CLJikanKeyAssoc, key, OBJC_ASSOCIATION_COPY_NONATOMIC);
+    [sl addTarget:self action:@selector(sliderChanged:)
+ forControlEvents:(UIControlEventTouchUpInside | UIControlEventTouchUpOutside)];
+    return [self rowWithTitle:title control:sl];
+}
+
+- (UIView *)segmentRow:(NSString *)title key:(NSString *)key
+                values:(NSArray<NSString *> *)values titles:(NSArray<NSString *> *)titles def:(NSString *)def {
+    UISegmentedControl *seg = [[UISegmentedControl alloc] initWithItems:titles];
+    seg.selectedSegmentTintColor = CLColorTeal();
+    NSString *cur = self.prefs[key] ?: def;
+    NSUInteger idx = [values indexOfObject:cur];
+    seg.selectedSegmentIndex = (idx == NSNotFound) ? 0 : (NSInteger)idx;
+    objc_setAssociatedObject(seg, CLJikanKeyAssoc, key, OBJC_ASSOCIATION_COPY_NONATOMIC);
+    objc_setAssociatedObject(seg, CLJikanValuesAssoc, values, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    [seg addTarget:self action:@selector(segmentChanged:) forControlEvents:UIControlEventValueChanged];
+    [seg.widthAnchor constraintEqualToConstant:150].active = YES;
+    return [self rowWithTitle:title control:seg];
+}
+
+- (UIView *)buttonRow:(NSString *)title action:(SEL)action {
+    UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
+    b.translatesAutoresizingMaskIntoConstraints = NO;
+    [b setTitle:title forState:UIControlStateNormal];
+    [b setTitleColor:CLColorOrange() forState:UIControlStateNormal];
+    b.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
+    [b addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
+    UIView *row = [[UIView alloc] init];
+    row.translatesAutoresizingMaskIntoConstraints = NO;
+    [row addSubview:b];
+    [NSLayoutConstraint activateConstraints:@[
+        [row.heightAnchor constraintEqualToConstant:46],
+        [b.leadingAnchor constraintEqualToAnchor:row.leadingAnchor constant:16],
+        [b.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
+    ]];
+    return row;
+}
+
+#pragma mark 动作
+
+- (void)switchChanged:(UISwitch *)sw {
+    [self setKey:objc_getAssociatedObject(sw, CLJikanKeyAssoc) value:@(sw.isOn)];
+}
+
+- (void)sliderChanged:(UISlider *)sl {
+    [self setKey:objc_getAssociatedObject(sl, CLJikanKeyAssoc) value:@((NSInteger)lroundf(sl.value))];
+}
+
+- (void)segmentChanged:(UISegmentedControl *)seg {
+    NSString *key = objc_getAssociatedObject(seg, CLJikanKeyAssoc);
+    NSArray *values = objc_getAssociatedObject(seg, CLJikanValuesAssoc);
+    NSInteger i = seg.selectedSegmentIndex;
+    if (key && i >= 0 && (NSUInteger)i < values.count) {
+        [self setKey:key value:values[(NSUInteger)i]];
+    }
+}
+
+- (void)resetPosition {
+    [self setKey:@"pillPosXPortraitPercent" value:@50];
+    [self setKey:@"pillPosYPortraitPercent" value:@84];
+    [self setKey:@"pillPosXLandscapePercent" value:@50];
+    [self setKey:@"pillPosYLandscapePercent" value:@84];
+}
+
+#pragma mark 构建
+
+- (void)buildUI {
+    for (UIView *v in self.content.arrangedSubviews) {
+        [self.content removeArrangedSubview:v];
+        [v removeFromSuperview];
+    }
+    [self.content addArrangedSubview:CLJikanLabel(@"显示", 12, UIFontWeightSemibold, CLColorSub())];
+    [self.content addArrangedSubview:[self cardWithRows:@[
+        [self switchRow:@"启用胶囊" key:@"enabled" def:YES],
+        [self switchRow:@"改用日期行显示" key:@"showEstimateBesideDate" def:NO],
+        [self switchRow:@"满充后继续显示" key:@"showAfterFullCharge" def:NO],
+    ]]];
+
+    [self.content addArrangedSubview:CLJikanLabel(@"外观", 12, UIFontWeightSemibold, CLColorSub())];
+    [self.content addArrangedSubview:[self cardWithRows:@[
+        [self segmentRow:@"样式" key:@"pillAppearance"
+                  values:@[@"classic", @"progressRing"]
+                  titles:@[@"经典", @"进度环"] def:@"classic"],
+        [self sliderRow:@"背景不透明度" key:@"pillBackgroundOpacityPercent" def:100],
+    ]]];
+
+    [self.content addArrangedSubview:CLJikanLabel(@"位置", 12, UIFontWeightSemibold, CLColorSub())];
+    [self.content addArrangedSubview:[self cardWithRows:@[
+        [self sliderRow:@"竖屏 X" key:@"pillPosXPortraitPercent" def:50],
+        [self sliderRow:@"竖屏 Y" key:@"pillPosYPortraitPercent" def:84],
+        [self sliderRow:@"横屏 X" key:@"pillPosXLandscapePercent" def:50],
+        [self sliderRow:@"横屏 Y" key:@"pillPosYLandscapePercent" def:84],
+        [self switchRow:@"锁定 X 轴" key:@"lockPreviewXAxis" def:NO],
+        [self switchRow:@"锁定 Y 轴" key:@"lockPreviewYAxis" def:NO],
+        [self buttonRow:@"重置胶囊位置" action:@selector(resetPosition)],
+    ]]];
+
+    [self.content addArrangedSubview:CLJikanLabel(@"其它", 12, UIFontWeightSemibold, CLColorSub())];
+    [self.content addArrangedSubview:[self cardWithRows:@[
+        [self switchRow:@"隐藏快捷操作按钮" key:@"hideQuickActionButtons" def:NO],
+        [self switchRow:@"仅充电时隐藏" key:@"hideQuickActionButtonsOnlyWhenCharging" def:NO],
+        [self switchRow:@"隐藏「滑动来解锁」" key:@"hideSwipeToUnlockText" def:NO],
+    ]]];
+}
+
+@end
+
+static UIViewController *CLMakeJikanSettingsVC(void) {
+    return [[CLJikanSettingsViewController alloc] init];
+}
