@@ -303,8 +303,7 @@ sign_roothide_app() {
 # Companion tweak dylib for thermalmonitord injection (design D6):
 # compiled directly with clang per package arch, fake-signed with ldid; no Theos/Logos.
 build_tweak_dylib() {
-  TWEAK_ARCH="$1"
-  TWEAK_OUT="$2"
+  TWEAK_OUT="$1"
   plutil -lint "$TWEAK_SRC_DIR/$TWEAK_NAME.plist" >/dev/null
   # RootHide 注入需要 tweak 链接 libroot（-lroothide），否则 ellekit 不注入
   # （真机 2.0.158 CPUthermal 能注入、我们不注入的差异即在此）。
@@ -313,16 +312,16 @@ build_tweak_dylib() {
     LROOT="-L/opt/theos/vendor/lib -lroothide -I/opt/theos/vendor/include"
   fi
   xcrun -sdk iphoneos clang -dynamiclib \
-    -arch "$TWEAK_ARCH" \
+    -arch arm64 -arch arm64e \
     -fobjc-arc \
-    -miphoneos-version-min=11.0 \
+    -miphoneos-version-min=14.0 \
     -framework Foundation \
     $LROOT \
     "$ROOT_DIR/ChargeLimiter/IOKit.tbd" \
     "$TWEAK_SRC_DIR/CLThermalSimTweak.m" \
     -o "$TWEAK_OUT"
-  ldid -S"$TWEAK_SRC_DIR/$TWEAK_NAME.entitlements" "$TWEAK_OUT"
-  # 与 daemon 同款：追加 roothide 兼容合并（RootHide ellekit 注入需要）。
+  # 无 entitlements 假签名（对齐 CTHermes），再追加 roothide 兼容合并。
+  ldid -S "$TWEAK_OUT"
   if [ -f "$ROOTHIDE_MERGE_ENT" ]; then
     ldid -M "-S$ROOTHIDE_MERGE_ENT" "$TWEAK_OUT"
   fi
@@ -580,11 +579,9 @@ fi
 echo "[5b/10] Build companion tweak dylibs..."
 TWEAK_STAGE_DIR="$STAGE_DIR/tweak"
 mkdir -p "$TWEAK_STAGE_DIR"
-if [ "$BUILD_ROOTFUL_PKG" = "1" ] || [ "$BUILD_ROOTLESS_PKG" = "1" ]; then
-  build_tweak_dylib arm64 "$TWEAK_STAGE_DIR/$TWEAK_NAME.dylib"
-fi
-if [ "$BUILD_NATIVE_ROOTHIDE" = "1" ]; then
-  build_tweak_dylib arm64e "$TWEAK_STAGE_DIR/$TWEAK_NAME-arm64e.dylib"
+# fat 双架构 dylib（arm64+arm64e）一次构建，三种 scheme 通用。
+if [ "$BUILD_ROOTFUL_PKG" = "1" ] || [ "$BUILD_ROOTLESS_PKG" = "1" ] || [ "$BUILD_NATIVE_ROOTHIDE" = "1" ]; then
+  build_tweak_dylib "$TWEAK_STAGE_DIR/$TWEAK_NAME.dylib"
 fi
 
 if [ "$BUILD_ROOTFUL_PKG" = "1" ] || [ "$BUILD_ROOTLESS_PKG" = "1" ]; then
@@ -642,7 +639,7 @@ if [ "$BUILD_NATIVE_ROOTHIDE" = "1" ]; then
   mkdir -p "$STAGE_ROOTHIDE_DIR/Applications"
   cp -a "$ROOTHIDE_APP" "$STAGE_ROOTHIDE_DIR/Applications/ChargeLimiter.app"
   cp -p "$ROOT_DIR/packaging/Icon.png" "$ROOT_DIR/packaging/Icon@2x.png" "$STAGE_ROOTHIDE_DIR/Applications/ChargeLimiter.app/"
-  stage_tweak_files "$STAGE_ROOTHIDE_DIR" "$TWEAK_STAGE_DIR/$TWEAK_NAME-arm64e.dylib"
+  stage_tweak_files "$STAGE_ROOTHIDE_DIR" "$TWEAK_STAGE_DIR/$TWEAK_NAME.dylib"
   # --- 集成「锁屏充电胶囊」：把 patched Jikan 合并进本包 ---
   # 只合并渲染所需资源（dylib / 过滤 plist / 本地化）；设置入口在 App 内，不打 PreferenceBundle。
   # 不含 JikanPowerd（我们用外部 ETA，不需要输入功率采样）。
