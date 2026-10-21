@@ -38,17 +38,22 @@ jobs:
           sudo git clone --depth 1 --recursive https://github.com/roothide/theos /opt/theos
           sudo chown -R "$(whoami)" /opt/theos
 
+      - name: Install packaging tools (dpkg, ldid)
+        run: brew install dpkg ldid
+
       - name: Build package (${{ matrix.scheme }})
         env:
           THEOS: /opt/theos
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP/jikan"
+          SDK=$(xcrun --sdk iphoneos --show-sdk-version)
+          echo "Using iPhoneOS SDK $SDK"
           make clean || true
           make package \
             THEOS_PACKAGE_SCHEME=${{ matrix.scheme }} \
             FINALPACKAGE=1 \
-            TARGET=iphone:clang:latest:14.0 \
+            TARGET=iphone:clang:${SDK}:14.0 \
             DEBUG=0
 
       - name: Collect deb
