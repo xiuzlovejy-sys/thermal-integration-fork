@@ -5766,17 +5766,10 @@ static void JYAppendValue(NSMutableString *out, id v, int depth) {
 // api=jikan_sync 与 set_conf(jy_max_percent) 共用，避免两套逻辑漂移。
 // Jikan（胶囊）偏好文件路径：数据分区，但 RootHide 下仍要兼容 .jbroot 布局。
 static NSString* CLJikanPrefsPath(void) {
-    NSString *jbRoot = CLDaemonJbRootPath() ?: @"";
-    NSString *rel = @"/var/mobile/Library/Preferences/moe.waru.jikan.preferences.plist";
-    NSFileManager *fm = [NSFileManager defaultManager];
-    NSMutableArray<NSString *> *cands = [NSMutableArray array];
-    if (jbRoot.length > 0) [cands addObject:[jbRoot stringByAppendingString:rel]];
-    [cands addObject:rel];
-    [cands addObject:[@"/var/jb" stringByAppendingString:rel]];
-    for (NSString *c in cands) {
-        if ([fm fileExistsAtPath:c]) return c;
-    }
-    return cands.firstObject ?: rel;
+    // 用户偏好恒在数据分区；jbroot 只重定向系统库/二进制，不重定向 /var/mobile。
+    // 之前误把 jbroot 前缀当首选，首次安装（文件还不存在）会写进 jbroot 里，
+    // 胶囊（以 mobile 运行）永远读不到。
+    return @"/var/mobile/Library/Preferences/moe.waru.jikan.preferences.plist";
 }
 
 // 写一个键并让胶囊立即重载；归 mobile 所有，否则 Jikan 自己改设置会失败。
@@ -5792,6 +5785,12 @@ static BOOL CLJikanSetValue(NSString *key, id val) {
     if (![prefs writeToFile:path atomically:YES]) return NO;
     chown(path.fileSystemRepresentation, 501, 501);
     chmod(path.fileSystemRepresentation, 0644);
+    // 直写 plist 绕过 cfprefsd 缓存：胶囊 dylib 用 NSUserDefaults 读，会拿到旧值。
+    // 先杀 cfprefsd 让它丢缓存（自动重启后重读磁盘），再发重载通知让胶囊立即重读。
+    {
+        pid_t child = 0;
+        spawn(@[@"killall", @"cfprefsd"], nil, nil, &child, SPAWN_FLAG_NOWAIT, nil);
+    }
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
                                          CFSTR("moe.waru.jikan.preferences.reload"),
                                          NULL, NULL, true);

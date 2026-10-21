@@ -157,7 +157,7 @@ def branding_guard():
                 'ChargeLimiter/Package_rootless/DEBIAN/control'):
         text = (ROOT / rel).read_text()
         assert 'Package: com.jy.charge' in text, f'{rel}: package id not rebranded'
-        assert "Name: Jy's charge" in text, f'{rel}: name not rebranded'
+        assert "Name: Jy's Charge" in text, f'{rel}: name not rebranded'
         assert f'Version: {version}' in text, f'{rel}: control version != {version}'
     tracked = subprocess.run(['git', 'ls-files'], capture_output=True, text=True,
                              check=True).stdout.split()

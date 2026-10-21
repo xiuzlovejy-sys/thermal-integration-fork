@@ -393,7 +393,7 @@ static UIViewController *CLMakeJikanSettingsVC(void);
     ]];
 
     // ---- 标题 ----
-    UILabel *title = [self label:@"Jy's charge" size:20 weight:UIFontWeightSemibold color:CLColorText()];
+    UILabel *title = [self label:@"Jy's Charge" size:20 weight:UIFontWeightSemibold color:CLColorText()];
     UILabel *subtitle = [self label:@"智能温控充电" size:12 weight:UIFontWeightRegular color:CLColorSub()];
     self.dayCountLabel = [self label:@"" size:12 weight:UIFontWeightMedium color:CLColorTeal()];
     self.dayCountLabel.textAlignment = NSTextAlignmentRight;
@@ -930,7 +930,7 @@ static UIViewController *CLMakeJikanSettingsVC(void);
 
     // ---- 版本号（整个软件最下方）----
     NSString *ver = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"];
-    self.versionLabel = [self label:[NSString stringWithFormat:@"Jy's charge v%@", ver ?: @"?"]
+    self.versionLabel = [self label:[NSString stringWithFormat:@"Jy's Charge v%@", ver ?: @"?"]
                                size:11 weight:UIFontWeightRegular color:CLColorSub()];
     self.versionLabel.textAlignment = NSTextAlignmentCenter;
     [stack addArrangedSubview:self.versionLabel];
