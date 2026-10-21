@@ -5936,6 +5936,39 @@ static NSString* CLSMCProbe(void) {
     return out;
 }
 
+
+// 枚举关键服务的 user-client 元数据：定位可写连续电流入口所需的 entitlement 与连接类型。
+static NSString* CLSMCUserClientProbe(void) {
+    NSMutableString *out = [NSMutableString string];
+    NSArray<NSString *> *names = @[@"AppleSMC", @"AppleSmartBatteryManager",
+                                   @"AppleSmartBattery", @"IOAccessoryPortManager",
+                                   @"AppleSMCCharger", @"AppleSMCChargerPS",
+                                   @"AppleSMCHighVoltageCharger"];
+    NSArray<NSString *> *metaKeys = @[@"IOUserClientClass", @"IOUserClientEntitlements",
+                                      @"IOUserClientType"];
+    for (NSString *name in names) {
+        io_service_t svc = IOServiceGetMatchingService(kIOMasterPortDefault,
+                                                       IOServiceMatching(name.UTF8String));
+        if (svc == IO_OBJECT_NULL) { [out appendFormat:@"%@ : 未找到\n", name]; continue; }
+        NSMutableString *meta = [NSMutableString string];
+        for (NSString *k in metaKeys) {
+            CFTypeRef v = IORegistryEntryCreateCFProperty(svc, (__bridge CFStringRef)k,
+                                                          kCFAllocatorDefault, 0);
+            if (v != NULL) { [meta appendFormat:@"  %@ = %@\n", k, v]; CFRelease(v); }
+        }
+        NSMutableString *openres = [NSMutableString string];
+        for (int t = 0; t <= 2; t++) {
+            io_connect_t conn = 0;
+            kern_return_t kr = IOServiceOpen(svc, mach_task_self(), (uint32_t)t, &conn);
+            if (kr == KERN_SUCCESS) { [openres appendFormat:@" type%d=ok", t]; IOServiceClose(conn); }
+            else [openres appendFormat:@" type%d=0x%x", t, kr];
+        }
+        [out appendFormat:@"== %@ ==\n%@  IOServiceOpen:%@\n", name, meta, openres];
+        IOObjectRelease(svc);
+    }
+    return out;
+}
+
 NSDictionary* handleReq(NSDictionary* nsreq) {
     g_lastMasterOffRequestTs = time(0);   // 非驻留形态空闲退出计时（B4）
     syncDaemonDocumentsForRequest(nsreq);
@@ -6415,6 +6448,8 @@ NSDictionary* handleReq(NSDictionary* nsreq) {
         dumpService(@"AppleSmartBattery");
         [out appendString:@"\n\n==== SMC 键枚举 ====\n"];
         [out appendString:CLSMCProbe()];
+        [out appendString:@"\n\n==== user-client 元数据 ====\n"];
+        [out appendString:CLSMCUserClientProbe()];
         return @{@"status": @0, @"data": @{@"text": out}};
     } else if ([api isEqualToString:@"jy_log_clear"]) {
         [CLThermalGovernor clearLog];
