@@ -188,6 +188,8 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
 @property (nonatomic, assign) NSTimeInterval curveLastSampleTs;
 // 紧急补电（定时暂停温控，到点自动恢复）
 @property (nonatomic, strong) UIButton *urgentButton;
+// 同步目标到 Jikan（锁屏剩余时间）
+@property (nonatomic, strong) UIButton *jikanButton;
 // 充电模式预设（护电/均衡/快充）
 @property (nonatomic, strong) UISegmentedControl *presetControl;
 // PWM 周期：顺滑优先(20s) / 少启停优先(60s)
@@ -225,6 +227,7 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
 - (void)updateDayCount;
 - (void)sampleCurveIfNeeded;
 - (void)urgentTopUp:(UIButton *)sender;
+- (void)syncToJikan:(UIButton *)sender;
 - (void)updateUrgentButton;
 - (void)presetChanged:(UISegmentedControl *)sender;
 - (void)periodChanged:(UISegmentedControl *)sender;
@@ -488,6 +491,19 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
     [maxCard addSubview:self.maxValueLabel];
     [maxCard addSubview:self.maxSlider];
     [maxCard addSubview:maxDesc];
+
+    // 同步目标到 Jikan：Jikan 负责锁屏渲染，我们只写它的偏好 + 发重载通知。
+    self.jikanButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    self.jikanButton.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.jikanButton setTitle:@"同步到 Jikan（锁屏剩余时间）" forState:UIControlStateNormal];
+    self.jikanButton.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
+    [self.jikanButton setTitleColor:CLColorTeal() forState:UIControlStateNormal];
+    self.jikanButton.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.06];
+    self.jikanButton.layer.cornerRadius = 12;
+    self.jikanButton.contentEdgeInsets = UIEdgeInsetsMake(6, 12, 6, 12);
+    [self.jikanButton addTarget:self action:@selector(syncToJikan:)
+               forControlEvents:UIControlEventTouchUpInside];
+    [maxCard addSubview:self.jikanButton];
     [NSLayoutConstraint activateConstraints:@[
         [maxTitle.topAnchor constraintEqualToAnchor:maxCard.topAnchor constant:18],
         [maxTitle.leadingAnchor constraintEqualToAnchor:maxCard.leadingAnchor constant:20],
@@ -502,7 +518,11 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
         [maxDesc.topAnchor constraintEqualToAnchor:self.maxSlider.bottomAnchor constant:10],
         [maxDesc.leadingAnchor constraintEqualToAnchor:maxTitle.leadingAnchor],
         [maxDesc.trailingAnchor constraintEqualToAnchor:maxCard.trailingAnchor constant:-20],
-        [maxDesc.bottomAnchor constraintEqualToAnchor:maxCard.bottomAnchor constant:-18],
+
+        [self.jikanButton.topAnchor constraintEqualToAnchor:maxDesc.bottomAnchor constant:10],
+        [self.jikanButton.leadingAnchor constraintEqualToAnchor:maxTitle.leadingAnchor],
+        [self.jikanButton.heightAnchor constraintEqualToConstant:30],
+        [self.jikanButton.bottomAnchor constraintEqualToAnchor:maxCard.bottomAnchor constant:-16],
     ]];
 
     // ---- 充电模式（预设）----
@@ -901,6 +921,45 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
         [self showStatus:@"紧急补电 30 分钟：温控暂停，到点自动恢复" ok:YES];
     }
     [self updateUrgentButton];
+}
+
+// 同步目标到 Jikan：锁屏渲染由 Jikan（SpringBoard 插件）负责，
+// 这里只写它的偏好并触发重载，避免用户再进 Jikan 设置手动 Sync。
+//   moe.waru.jikan.preferences
+//     batteryEstimateTargetPercent       Jikan 算法（1–100）
+//     batteryEstimateAppleTargetPercent  Apple 算法（仅 80/85/90/95/100）
+- (void)syncToJikan:(UIButton *)sender {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    BOOL installed =
+        [fm fileExistsAtPath:@"/Library/MobileSubstrate/DynamicLibraries/Jikan.dylib"] ||
+        [fm fileExistsAtPath:@"/var/jb/Library/MobileSubstrate/DynamicLibraries/Jikan.dylib"] ||
+        [fm fileExistsAtPath:@"/Library/PreferenceBundles/JikanPreferences.bundle"] ||
+        [fm fileExistsAtPath:@"/var/jb/Library/PreferenceBundles/JikanPreferences.bundle"] ||
+        [fm fileExistsAtPath:@"/var/mobile/Library/Preferences/moe.waru.jikan.preferences.plist"];
+    if (!installed) {
+        [self showStatus:@"未检测到 Jikan，请先安装" ok:NO];
+        return;
+    }
+    NSInteger maxPct = [self intFromConf:@"jy_max_percent" fallback:80];
+    NSInteger apple = 80;
+    if (maxPct >= 98)      apple = 100;
+    else if (maxPct >= 93) apple = 95;
+    else if (maxPct >= 88) apple = 90;
+    else if (maxPct >= 83) apple = 85;
+
+    NSString *path = @"/var/mobile/Library/Preferences/moe.waru.jikan.preferences.plist";
+    NSMutableDictionary *prefs = [[NSDictionary dictionaryWithContentsOfFile:path] mutableCopy];
+    if (prefs == nil) prefs = [NSMutableDictionary dictionary];
+    prefs[@"batteryEstimateTargetPercent"] = @(maxPct);
+    prefs[@"batteryEstimateAppleTargetPercent"] = @(apple);
+    if (![prefs writeToFile:path atomically:YES]) {
+        [self showStatus:@"同步失败：无法写入 Jikan 偏好" ok:NO];
+        return;
+    }
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                         CFSTR("moe.waru.jikan.preferences.reload"),
+                                         NULL, NULL, true);
+    [self showStatus:[NSString stringWithFormat:@"已同步目标 %ld%% 到 Jikan", (long)maxPct] ok:YES];
 }
 
 - (void)updateUrgentButton {
