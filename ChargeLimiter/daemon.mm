@@ -5837,6 +5837,105 @@ static NSDictionary* CLJikanSyncNow(void) {
                           @"jbroot": jbRoot } };
 }
 
+
+// ---- SMC 键枚举探针（AppleSMC user-client，注入无关，只读）----
+// 协议（fanpro/SMCKit 实证）：IOServiceOpen(type=0) → IOConnectCallStructMethod(conn, 选择器2)
+// 80 字节参数结构：key@0, dataSize@28, result@40, data8@42(命令), data32@44, bytes@48。
+// 命令：5=读键 6=写键 8=按键索引取键名 9=键信息；值为 big-endian。
+typedef struct {
+    uint32_t key;
+    uint8_t  pad1[24];
+    uint32_t dataSize;
+    uint8_t  pad2[8];
+    uint8_t  result;
+    uint8_t  status;
+    uint8_t  data8;
+    uint8_t  pad3;
+    uint32_t data32;
+    uint8_t  bytes[32];
+} CLSMCParam;   // 80 字节
+
+static uint32_t CLSMCFourCC(const char *s) {
+    return ((uint32_t)(unsigned char)s[0] << 24) |
+           ((uint32_t)(unsigned char)s[1] << 16) |
+           ((uint32_t)(unsigned char)s[2] << 8) |
+           ((uint32_t)(unsigned char)s[3]);
+}
+
+static NSString* CLSMCKeyName(uint32_t key) {
+    char b[5];
+    b[0] = (char)((key >> 24) & 0xFF);
+    b[1] = (char)((key >> 16) & 0xFF);
+    b[2] = (char)((key >> 8) & 0xFF);
+    b[3] = (char)(key & 0xFF);
+    b[4] = 0;
+    return [NSString stringWithUTF8String:b];
+}
+
+static NSString* CLSMCProbe(void) {
+    NSMutableString *out = [NSMutableString string];
+    io_service_t svc = IOServiceGetMatchingService(kIOMasterPortDefault, IOServiceMatching("AppleSMC"));
+    if (svc == IO_OBJECT_NULL) { [out appendString:@"AppleSMC 服务未找到\n"]; return out; }
+    io_connect_t conn = 0;
+    kern_return_t kr = IOServiceOpen(svc, mach_task_self(), 0, &conn);
+    IOObjectRelease(svc);
+    if (kr != KERN_SUCCESS) { [out appendFormat:@"IOServiceOpen 失败 kr=0x%x\n", kr]; return out; }
+
+    CLSMCParam in, outp;
+    size_t outSize = sizeof(outp);
+
+    // 读 #KEY 数量
+    memset(&in, 0, sizeof(in));
+    in.key = CLSMCFourCC("#KEY");
+    in.dataSize = 4;
+    in.data8 = 5;   // 读键
+    memset(&outp, 0, sizeof(outp));
+    outSize = sizeof(outp);
+    kr = IOConnectCallStructMethod(conn, 2, &in, sizeof(in), &outp, &outSize);
+    int count = 0;
+    if (kr == KERN_SUCCESS && outp.result == 0) {
+        uint32_t c = 0;
+        memcpy(&c, outp.bytes, 4);
+        count = (int)CFSwapInt32BigToHost(c);
+        [out appendFormat:@"SMC 键总数 = %d\n", count];
+    } else {
+        [out appendFormat:@"#KEY 读取失败 kr=0x%x result=%d\n", kr, outp.result];
+    }
+
+    [out appendString:@"--- 键列表 ---\n"];
+    int shown = 0;
+    for (int i = 0; i < count && shown < 400; i++) {
+        memset(&in, 0, sizeof(in));
+        in.data32 = (uint32_t)i;
+        in.data8 = 8;   // 按键索引取键名
+        memset(&outp, 0, sizeof(outp));
+        outSize = sizeof(outp);
+        kr = IOConnectCallStructMethod(conn, 2, &in, sizeof(in), &outp, &outSize);
+        if (kr != KERN_SUCCESS || outp.result != 0) continue;
+        NSString *name = CLSMCKeyName(outp.key);
+
+        memset(&in, 0, sizeof(in));
+        in.key = outp.key;
+        in.dataSize = 4;
+        in.data8 = 5;
+        memset(&outp, 0, sizeof(outp));
+        outSize = sizeof(outp);
+        kern_return_t kr2 = IOConnectCallStructMethod(conn, 2, &in, sizeof(in), &outp, &outSize);
+        NSString *val = @"";
+        if (kr2 == KERN_SUCCESS && outp.result == 0) {
+            uint32_t v = 0; memcpy(&v, outp.bytes, 4);
+            val = [NSString stringWithFormat:@"= %u", CFSwapInt32BigToHost(v)];
+        } else {
+            val = [NSString stringWithFormat:@"(读失败 kr=0x%x r=%d)", kr2, outp.result];
+        }
+        [out appendFormat:@"  %@  %@\n", name, val];
+        shown++;
+    }
+    IOServiceClose(conn);
+    [out appendFormat:@"--- 枚举 %d/%d ---\n", shown, count];
+    return out;
+}
+
 NSDictionary* handleReq(NSDictionary* nsreq) {
     g_lastMasterOffRequestTs = time(0);   // 非驻留形态空闲退出计时（B4）
     syncDaemonDocumentsForRequest(nsreq);
@@ -6314,6 +6413,8 @@ NSDictionary* handleReq(NSDictionary* nsreq) {
             IOObjectRelease(s);
         };
         dumpService(@"AppleSmartBattery");
+        [out appendString:@"\n\n==== SMC 键枚举 ====\n"];
+        [out appendString:CLSMCProbe()];
         return @{@"status": @0, @"data": @{@"text": out}};
     } else if ([api isEqualToString:@"jy_log_clear"]) {
         [CLThermalGovernor clearLog];
