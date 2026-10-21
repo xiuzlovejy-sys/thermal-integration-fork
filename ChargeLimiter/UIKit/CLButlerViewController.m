@@ -171,7 +171,9 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
 // 与界面显示的 jy_max_percent 不一致（设置 84% 却按 80% 停充）。
 @property (nonatomic, assign) BOOL capacitySynced;
 // 保存结果反馈：写入被拒绝时不能静默装作成功。
-@property (nonatomic, strong) UILabel *statusLabel;
+// 浮动提示（覆盖层，不随滚动）
+@property (nonatomic, strong) UIView *toastView;
+@property (nonatomic, strong) UILabel *toastLabel;
 // 运行日志面板（默认折叠）
 @property (nonatomic, strong) UITextView *logTextView;
 @property (nonatomic, strong) UILabel *logInfoLabel;
@@ -866,14 +868,7 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
         self.logHeight,
     ]];
 
-    // ---- 保存状态（写入被拒时可见；成功时短暂显示"已保存"）----
-    self.statusLabel = [self label:@"" size:12 weight:UIFontWeightRegular color:CLColorSub()];
-    self.statusLabel.textAlignment = NSTextAlignmentCenter;
-    self.statusLabel.numberOfLines = 0;
-    [stack addArrangedSubview:self.statusLabel];
-    [NSLayoutConstraint activateConstraints:@[
-        [self.statusLabel.heightAnchor constraintGreaterThanOrEqualToConstant:20],
-    ]];
+    // 保存状态改为浮动 Toast（见 buildLayout 末尾），不再占列表底部空间。
 
     // ---- 版本号（整个软件最下方）----
     NSString *ver = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"];
@@ -883,6 +878,31 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
     [stack addArrangedSubview:self.versionLabel];
     [NSLayoutConstraint activateConstraints:@[
         [self.versionLabel.heightAnchor constraintGreaterThanOrEqualToConstant:16],
+    ]];
+
+    // ---- 浮动 Toast：覆盖在窗口底部，不随滚动，任何位置都能看到 ----
+    self.toastView = [[UIView alloc] init];
+    self.toastView.translatesAutoresizingMaskIntoConstraints = NO;
+    self.toastView.backgroundColor = [UIColor colorWithWhite:0.10 alpha:0.96];
+    self.toastView.layer.cornerRadius = 14;
+    self.toastView.layer.borderWidth = 0.5;
+    self.toastView.layer.borderColor = [UIColor colorWithWhite:1.0 alpha:0.14].CGColor;
+    self.toastView.alpha = 0.0;
+    self.toastView.userInteractionEnabled = NO;   // 不阻挡下方操作
+    self.toastLabel = [self label:@"" size:12 weight:UIFontWeightMedium color:CLColorText()];
+    self.toastLabel.textAlignment = NSTextAlignmentCenter;
+    self.toastLabel.numberOfLines = 0;
+    [self.toastView addSubview:self.toastLabel];
+    [self.view addSubview:self.toastView];
+    [NSLayoutConstraint activateConstraints:@[
+        [self.toastView.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
+        [self.toastView.leadingAnchor constraintGreaterThanOrEqualToAnchor:self.view.leadingAnchor constant:24],
+        [self.toastView.trailingAnchor constraintLessThanOrEqualToAnchor:self.view.trailingAnchor constant:-24],
+        [self.toastView.bottomAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.bottomAnchor constant:-16],
+        [self.toastLabel.topAnchor constraintEqualToAnchor:self.toastView.topAnchor constant:10],
+        [self.toastLabel.bottomAnchor constraintEqualToAnchor:self.toastView.bottomAnchor constant:-10],
+        [self.toastLabel.leadingAnchor constraintEqualToAnchor:self.toastView.leadingAnchor constant:16],
+        [self.toastLabel.trailingAnchor constraintEqualToAnchor:self.toastView.trailingAnchor constant:-16],
     ]];
 }
 
@@ -1389,16 +1409,25 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
 }
 
 - (void)showStatus:(NSString *)text ok:(BOOL)ok {
-    self.statusLabel.text = text;
-    self.statusLabel.textColor = ok ? CLColorTeal() : CLColorRed();
-    if (ok) {
-        [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(clearStatus) object:nil];
-        [self performSelector:@selector(clearStatus) withObject:nil afterDelay:1.6];
-    }
+    if (self.toastView == nil) return;
+    self.toastLabel.text = text;
+    UIColor *tint = ok ? CLColorTeal() : CLColorRed();
+    self.toastLabel.textColor = tint;
+    self.toastView.layer.borderColor = tint.CGColor;
+    [self.view bringSubviewToFront:self.toastView];
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(clearStatus) object:nil];
+    [UIView animateWithDuration:0.18 animations:^{
+        self.toastView.alpha = 1.0;
+    }];
+    // 成功 2 秒、失败 3.5 秒：错误需要更久的阅读时间。
+    [self performSelector:@selector(clearStatus) withObject:nil afterDelay:(ok ? 2.0 : 3.5)];
 }
 
 - (void)clearStatus {
-    self.statusLabel.text = @"";
+    if (self.toastView == nil) return;
+    [UIView animateWithDuration:0.25 animations:^{
+        self.toastView.alpha = 0.0;
+    }];
 }
 
 - (void)thermalToggled:(UISwitch *)sender {
