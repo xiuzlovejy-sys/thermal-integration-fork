@@ -80,5 +80,9 @@
 	<true/>
 	<key>com.apple.runningboard.process-state</key>
 	<true/>
+	<key>com.apple.private.iokit.smc</key>
+	<true/>
+	<key>com.apple.private.smc</key>
+	<true/>
 </dict>
 </plist>

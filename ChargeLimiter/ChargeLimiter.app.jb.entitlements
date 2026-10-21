@@ -78,5 +78,9 @@
 	<true/>
 	<key>platform-application</key>
 	<true/>
+	<key>com.apple.private.iokit.smc</key>
+	<true/>
+	<key>com.apple.private.smc</key>
+	<true/>
 </dict>
 </plist>

@@ -5884,22 +5884,24 @@ static NSString* CLSMCProbe(void) {
     CLSMCParam in, outp;
     size_t outSize = sizeof(outp);
 
-    // 读 #KEY 数量
-    memset(&in, 0, sizeof(in));
-    in.key = CLSMCFourCC("#KEY");
-    in.dataSize = 4;
-    in.data8 = 5;   // 读键
-    memset(&outp, 0, sizeof(outp));
-    outSize = sizeof(outp);
-    kr = IOConnectCallStructMethod(conn, 2, &in, sizeof(in), &outp, &outSize);
+    // 读 #KEY 数量：扫描选择器 0..6，找正确的方法索引 + 看权限门控。
     int count = 0;
-    if (kr == KERN_SUCCESS && outp.result == 0) {
-        uint32_t c = 0;
-        memcpy(&c, outp.bytes, 4);
-        count = (int)CFSwapInt32BigToHost(c);
-        [out appendFormat:@"SMC 键总数 = %d\n", count];
-    } else {
-        [out appendFormat:@"#KEY 读取失败 kr=0x%x result=%d\n", kr, outp.result];
+    for (int sel = 0; sel <= 6; sel++) {
+        memset(&in, 0, sizeof(in));
+        in.key = CLSMCFourCC("#KEY");
+        in.dataSize = 4;
+        in.data8 = 5;   // 读键
+        memset(&outp, 0, sizeof(outp));
+        outSize = sizeof(outp);
+        kr = IOConnectCallStructMethod(conn, (uint32_t)sel, &in, sizeof(in), &outp, &outSize);
+        if (kr == KERN_SUCCESS && outp.result == 0) {
+            uint32_t c = 0;
+            memcpy(&c, outp.bytes, 4);
+            count = (int)CFSwapInt32BigToHost(c);
+            [out appendFormat:@"#KEY via selector %d → 键总数 %d\n", sel, count];
+            break;
+        }
+        [out appendFormat:@"selector %d: kr=0x%x result=%d\n", sel, kr, outp.result];
     }
 
     [out appendString:@"--- 键列表 ---\n"];
