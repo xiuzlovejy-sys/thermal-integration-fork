@@ -200,6 +200,17 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
 @property (nonatomic, strong) UILabel *sessAvgLabel;
 @property (nonatomic, strong) UILabel *sessMahLabel;
 @property (nonatomic, strong) UILabel *sessCyclesLabel;
+// 最大充电说明（拖动时显示 ETA 预览）
+@property (nonatomic, strong) UILabel *maxDescLabel;
+// 充电记录
+@property (nonatomic, strong) UIStackView *historyStack;
+@property (nonatomic, assign) NSTimeInterval historyLastTs;
+// 周期满充校准（上游 full_charge_sched_*，仅暴露 UI）
+@property (nonatomic, strong) UISwitch *fullChargeSwitch;
+@property (nonatomic, strong) UISegmentedControl *fullChargeInterval;
+@property (nonatomic, strong) UIDatePicker *fullChargeTimePicker;
+@property (nonatomic, strong) UISlider *fullChargeDurationSlider;
+@property (nonatomic, strong) UILabel *fullChargeDurationLabel;
 
 // 显式声明（避免"方法定义在使用之后"的实例方法解析差异，编译更稳）
 - (void)refresh;
@@ -232,6 +243,14 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
 - (void)presetChanged:(UISegmentedControl *)sender;
 - (void)periodChanged:(UISegmentedControl *)sender;
 - (void)renderSession;
+- (void)loadHistory;
+- (void)renderHistory:(NSArray *)rows;
+- (void)fullChargeToggled:(UISwitch *)sender;
+- (void)fullChargeIntervalChanged:(UISegmentedControl *)sender;
+- (void)fullChargeTimeChanged:(UIDatePicker *)sender;
+- (void)fullChargeDurationChanged:(UISlider *)sender;
+- (void)commitFullChargeDuration;
+- (void)renderFullChargeSchedule;
 - (double)doubleFromConf:(NSString *)key fallback:(double)fallback;
 
 @end
@@ -476,8 +495,8 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
     UILabel *maxTitle = [self label:@"最大充电" size:16 weight:UIFontWeightMedium color:CLColorText()];
     self.maxValueLabel = [self label:@"80%" size:26 weight:UIFontWeightLight color:CLColorTeal()];
     self.maxValueLabel.textAlignment = NSTextAlignmentRight;
-    UILabel *maxDesc = [self label:@"达到该电量后停止充电，回落 5% 后恢复" size:12 weight:UIFontWeightRegular color:CLColorSub()];
-    maxDesc.numberOfLines = 0;
+    self.maxDescLabel = [self label:@"达到该电量后停止充电，回落 5% 后恢复" size:12 weight:UIFontWeightRegular color:CLColorSub()];
+    self.maxDescLabel.numberOfLines = 0;
     self.maxSlider = [[UISlider alloc] init];
     self.maxSlider.translatesAutoresizingMaskIntoConstraints = NO;
     self.maxSlider.minimumValue = 50;
@@ -490,7 +509,7 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
     [maxCard addSubview:maxTitle];
     [maxCard addSubview:self.maxValueLabel];
     [maxCard addSubview:self.maxSlider];
-    [maxCard addSubview:maxDesc];
+    [maxCard addSubview:self.maxDescLabel];
 
     // 同步目标到 Jikan：Jikan 负责锁屏渲染，我们只写它的偏好 + 发重载通知。
     self.jikanButton = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -515,11 +534,11 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
         [self.maxSlider.leadingAnchor constraintEqualToAnchor:maxCard.leadingAnchor constant:20],
         [self.maxSlider.trailingAnchor constraintEqualToAnchor:maxCard.trailingAnchor constant:-20],
 
-        [maxDesc.topAnchor constraintEqualToAnchor:self.maxSlider.bottomAnchor constant:10],
-        [maxDesc.leadingAnchor constraintEqualToAnchor:maxTitle.leadingAnchor],
-        [maxDesc.trailingAnchor constraintEqualToAnchor:maxCard.trailingAnchor constant:-20],
+        [self.maxDescLabel.topAnchor constraintEqualToAnchor:self.maxSlider.bottomAnchor constant:10],
+        [self.maxDescLabel.leadingAnchor constraintEqualToAnchor:maxTitle.leadingAnchor],
+        [self.maxDescLabel.trailingAnchor constraintEqualToAnchor:maxCard.trailingAnchor constant:-20],
 
-        [self.jikanButton.topAnchor constraintEqualToAnchor:maxDesc.bottomAnchor constant:10],
+        [self.jikanButton.topAnchor constraintEqualToAnchor:self.maxDescLabel.bottomAnchor constant:10],
         [self.jikanButton.leadingAnchor constraintEqualToAnchor:maxTitle.leadingAnchor],
         [self.jikanButton.heightAnchor constraintEqualToConstant:30],
         [self.jikanButton.bottomAnchor constraintEqualToAnchor:maxCard.bottomAnchor constant:-16],
@@ -663,6 +682,98 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
         [self.sessMahLabel.bottomAnchor constraintEqualToAnchor:sessCard.bottomAnchor constant:-18],
     ]];
 
+    // ---- 周期满充校准 ----
+    UIView *fcCard = [self card];
+    [stack addArrangedSubview:fcCard];
+    UILabel *fcTitle = [self label:@"周期满充校准" size:16 weight:UIFontWeightMedium color:CLColorText()];
+    self.fullChargeSwitch = [[UISwitch alloc] init];
+    self.fullChargeSwitch.translatesAutoresizingMaskIntoConstraints = NO;
+    self.fullChargeSwitch.onTintColor = CLColorTeal();
+    [self.fullChargeSwitch addTarget:self action:@selector(fullChargeToggled:)
+                    forControlEvents:UIControlEventValueChanged];
+    UILabel *fcDesc = [self label:@"每 N 天在指定窗口内放行到 100%，让电量计重新学习满充点（不改变实际容量）"
+                                size:12 weight:UIFontWeightRegular color:CLColorSub()];
+    fcDesc.numberOfLines = 0;
+    self.fullChargeInterval = [[UISegmentedControl alloc] initWithItems:@[@"7 天", @"15 天", @"30 天"]];
+    self.fullChargeInterval.translatesAutoresizingMaskIntoConstraints = NO;
+    self.fullChargeInterval.selectedSegmentTintColor = CLColorTeal();
+    [self.fullChargeInterval addTarget:self action:@selector(fullChargeIntervalChanged:)
+                      forControlEvents:UIControlEventValueChanged];
+    UILabel *fcTimeLabel = [self label:@"开始时间" size:12 weight:UIFontWeightRegular color:CLColorSub()];
+    self.fullChargeTimePicker = [[UIDatePicker alloc] init];
+    self.fullChargeTimePicker.translatesAutoresizingMaskIntoConstraints = NO;
+    self.fullChargeTimePicker.datePickerMode = UIDatePickerModeTime;
+    self.fullChargeTimePicker.preferredDatePickerStyle = UIDatePickerStyleCompact;
+    [self.fullChargeTimePicker addTarget:self action:@selector(fullChargeTimeChanged:)
+                        forControlEvents:UIControlEventValueChanged];
+    self.fullChargeDurationLabel = [self label:@"持续 3 小时" size:12 weight:UIFontWeightRegular color:CLColorSub()];
+    self.fullChargeDurationSlider = [[UISlider alloc] init];
+    self.fullChargeDurationSlider.translatesAutoresizingMaskIntoConstraints = NO;
+    self.fullChargeDurationSlider.minimumValue = 1;
+    self.fullChargeDurationSlider.maximumValue = 6;
+    self.fullChargeDurationSlider.minimumTrackTintColor = CLColorTeal();
+    self.fullChargeDurationSlider.maximumTrackTintColor = [UIColor colorWithWhite:1.0 alpha:0.12];
+    [self.fullChargeDurationSlider addTarget:self action:@selector(fullChargeDurationChanged:)
+                            forControlEvents:UIControlEventValueChanged];
+
+    for (UIView *v in @[fcTitle, self.fullChargeSwitch, fcDesc, self.fullChargeInterval,
+                        fcTimeLabel, self.fullChargeTimePicker,
+                        self.fullChargeDurationLabel, self.fullChargeDurationSlider]) {
+        [fcCard addSubview:v];
+    }
+    [NSLayoutConstraint activateConstraints:@[
+        [fcTitle.topAnchor constraintEqualToAnchor:fcCard.topAnchor constant:18],
+        [fcTitle.leadingAnchor constraintEqualToAnchor:fcCard.leadingAnchor constant:20],
+        [fcTitle.trailingAnchor constraintLessThanOrEqualToAnchor:self.fullChargeSwitch.leadingAnchor constant:-12],
+        [self.fullChargeSwitch.centerYAnchor constraintEqualToAnchor:fcTitle.centerYAnchor],
+        [self.fullChargeSwitch.trailingAnchor constraintEqualToAnchor:fcCard.trailingAnchor constant:-18],
+
+        [fcDesc.topAnchor constraintEqualToAnchor:fcTitle.bottomAnchor constant:6],
+        [fcDesc.leadingAnchor constraintEqualToAnchor:fcTitle.leadingAnchor],
+        [fcDesc.trailingAnchor constraintEqualToAnchor:fcCard.trailingAnchor constant:-20],
+
+        [self.fullChargeInterval.topAnchor constraintEqualToAnchor:fcDesc.bottomAnchor constant:12],
+        [self.fullChargeInterval.leadingAnchor constraintEqualToAnchor:fcTitle.leadingAnchor],
+        [self.fullChargeInterval.trailingAnchor constraintEqualToAnchor:fcCard.trailingAnchor constant:-20],
+        [self.fullChargeInterval.heightAnchor constraintEqualToConstant:30],
+
+        [fcTimeLabel.topAnchor constraintEqualToAnchor:self.fullChargeInterval.bottomAnchor constant:12],
+        [fcTimeLabel.leadingAnchor constraintEqualToAnchor:fcTitle.leadingAnchor],
+        [self.fullChargeTimePicker.centerYAnchor constraintEqualToAnchor:fcTimeLabel.centerYAnchor],
+        [self.fullChargeTimePicker.trailingAnchor constraintEqualToAnchor:fcCard.trailingAnchor constant:-20],
+
+        [self.fullChargeDurationLabel.topAnchor constraintEqualToAnchor:fcTimeLabel.bottomAnchor constant:10],
+        [self.fullChargeDurationLabel.leadingAnchor constraintEqualToAnchor:fcTitle.leadingAnchor],
+
+        [self.fullChargeDurationSlider.topAnchor constraintEqualToAnchor:self.fullChargeDurationLabel.bottomAnchor constant:4],
+        [self.fullChargeDurationSlider.leadingAnchor constraintEqualToAnchor:fcTitle.leadingAnchor],
+        [self.fullChargeDurationSlider.trailingAnchor constraintEqualToAnchor:fcCard.trailingAnchor constant:-20],
+        [self.fullChargeDurationSlider.bottomAnchor constraintEqualToAnchor:fcCard.bottomAnchor constant:-18],
+    ]];
+
+    // ---- 充电记录（最近 6 次会话，仅本地）----
+    UIView *histCard = [self card];
+    [stack addArrangedSubview:histCard];
+    UILabel *hTitle = [self label:@"充电记录" size:13 weight:UIFontWeightSemibold color:CLColorText()];
+    UILabel *hNote = [self label:@"仅本地保存" size:10 weight:UIFontWeightRegular color:CLColorSub()];
+    self.historyStack = [[UIStackView alloc] init];
+    self.historyStack.axis = UILayoutConstraintAxisVertical;
+    self.historyStack.spacing = 6;
+    self.historyStack.translatesAutoresizingMaskIntoConstraints = NO;
+    [histCard addSubview:hTitle];
+    [histCard addSubview:hNote];
+    [histCard addSubview:self.historyStack];
+    [NSLayoutConstraint activateConstraints:@[
+        [hTitle.topAnchor constraintEqualToAnchor:histCard.topAnchor constant:18],
+        [hTitle.leadingAnchor constraintEqualToAnchor:histCard.leadingAnchor constant:20],
+        [hNote.centerYAnchor constraintEqualToAnchor:hTitle.centerYAnchor],
+        [hNote.trailingAnchor constraintEqualToAnchor:histCard.trailingAnchor constant:-20],
+        [self.historyStack.topAnchor constraintEqualToAnchor:hTitle.bottomAnchor constant:10],
+        [self.historyStack.leadingAnchor constraintEqualToAnchor:histCard.leadingAnchor constant:20],
+        [self.historyStack.trailingAnchor constraintEqualToAnchor:histCard.trailingAnchor constant:-20],
+        [self.historyStack.bottomAnchor constraintEqualToAnchor:histCard.bottomAnchor constant:-18],
+    ]];
+
     // ---- 运行日志（默认折叠；排障时展开）----
     UIView *logCard = [self card];
     [stack addArrangedSubview:logCard];
@@ -795,6 +906,7 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
             [weakSelf syncCapacityKeys];
             [weakSelf renderSettings];
             [weakSelf renderLevel];
+            [weakSelf loadHistory];   // 20 秒节流，内部判断
         }
     }];
 }
@@ -1003,6 +1115,98 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
                   ok:YES];
 }
 
+- (void)loadHistory {
+    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+    if (now - self.historyLastTs < 20.0) return;   // 20 秒节流
+    self.historyLastTs = now;
+    __weak typeof(self) weakSelf = self;
+    [[CLAPIClient shared] sendRequest:@{ @"api": @"get_jy_sessions", @"n": @6 }
+                          completion:^(NSDictionary *response, NSError *error) {
+        if (error != nil) return;
+        NSArray *rows = [response[@"data"] isKindOfClass:[NSArray class]] ? response[@"data"] : @[];
+        [weakSelf renderHistory:rows];
+    }];
+}
+
+- (void)renderHistory:(NSArray *)rows {
+    if (self.historyStack == nil) return;
+    for (UIView *v in self.historyStack.arrangedSubviews) {
+        [self.historyStack removeArrangedSubview:v];
+        [v removeFromSuperview];
+    }
+    if (rows.count == 0) {
+        [self.historyStack addArrangedSubview:[self label:@"暂无记录（拔电后自动生成）"
+                                                    size:11 weight:UIFontWeightRegular color:CLColorSub()]];
+        return;
+    }
+    NSDateFormatter *df = [[NSDateFormatter alloc] init];
+    df.dateFormat = @"MM-dd HH:mm";
+    for (NSDictionary *r in rows) {
+        NSTimeInterval s = [r[@"start_ts"] doubleValue];
+        NSTimeInterval e = [r[@"end_ts"] doubleValue];
+        NSString *line = [NSString stringWithFormat:@"%@ → %@   %@%%→%@%%\n峰值 %.1f℃ · %.0fmAh · 启停 %@ 次",
+                          [df stringFromDate:[NSDate dateWithTimeIntervalSince1970:s]],
+                          [df stringFromDate:[NSDate dateWithTimeIntervalSince1970:e]],
+                          r[@"start_soc"] ?: @0, r[@"end_soc"] ?: @0,
+                          [r[@"peak_temp"] doubleValue], [r[@"mah_added"] doubleValue],
+                          r[@"cycles"] ?: @0];
+        UILabel *row = [self label:line size:11 weight:UIFontWeightRegular color:CLColorSub()];
+        row.numberOfLines = 0;
+        [self.historyStack addArrangedSubview:row];
+    }
+}
+
+- (void)fullChargeToggled:(UISwitch *)sender {
+    [self writeKey:@"full_charge_sched_enabled" value:@(sender.isOn)];
+    [self showStatus:(sender.isOn ? @"已开启周期满充校准" : @"已关闭周期满充校准") ok:YES];
+}
+
+- (void)fullChargeIntervalChanged:(UISegmentedControl *)sender {
+    NSArray<NSNumber *> *days = @[@7, @15, @30];
+    NSInteger idx = MAX(0, MIN((NSInteger)days.count - 1, sender.selectedSegmentIndex));
+    [self writeKey:@"full_charge_sched_interval_days" value:days[idx]];
+}
+
+- (void)fullChargeTimeChanged:(UIDatePicker *)sender {
+    NSDateComponents *c = [[NSCalendar currentCalendar]
+        components:(NSCalendarUnitHour | NSCalendarUnitMinute) fromDate:sender.date];
+    NSInteger minute = c.hour * 60 + c.minute;
+    [self writeKey:@"full_charge_sched_start_minute" value:@(minute)];
+}
+
+- (void)fullChargeDurationChanged:(UISlider *)sender {
+    NSInteger hours = (NSInteger)lroundf(sender.value);
+    self.fullChargeDurationLabel.text = [NSString stringWithFormat:@"持续 %ld 小时", (long)hours];
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(commitFullChargeDuration) object:nil];
+    [self performSelector:@selector(commitFullChargeDuration) withObject:nil afterDelay:0.35];
+}
+
+- (void)commitFullChargeDuration {
+    NSInteger hours = (NSInteger)lroundf(self.fullChargeDurationSlider.value);
+    [self writeKey:@"full_charge_sched_duration_hours" value:@(hours)];
+}
+
+- (void)renderFullChargeSchedule {
+    [self.fullChargeSwitch setOn:[self boolFromConf:@"full_charge_sched_enabled" fallback:NO] animated:NO];
+
+    NSInteger days = [self intFromConf:@"full_charge_sched_interval_days" fallback:30];
+    NSInteger idx = 2;
+    if (days <= 7) idx = 0;
+    else if (days <= 15) idx = 1;
+    self.fullChargeInterval.selectedSegmentIndex = idx;
+
+    NSInteger minute = [self intFromConf:@"full_charge_sched_start_minute" fallback:180];
+    NSDateComponents *c = [[NSDateComponents alloc] init];
+    c.hour = (minute / 60) % 24;
+    c.minute = minute % 60;
+    NSDate *d = [[NSCalendar currentCalendar] dateFromComponents:c];
+    if (d != nil) [self.fullChargeTimePicker setDate:d animated:NO];
+
+    NSInteger hours = [self intFromConf:@"full_charge_sched_duration_hours" fallback:3];
+    self.fullChargeDurationSlider.value = (float)hours;
+    self.fullChargeDurationLabel.text = [NSString stringWithFormat:@"持续 %ld 小时", (long)hours];
+}
+
 - (void)renderSession {
     BOOL active = [self boolFromConf:@"jy_sess_active" fallback:NO];
     NSInteger mins = [self intFromConf:@"jy_sess_min" fallback:0];
@@ -1127,12 +1331,33 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
     NSInteger pwmPeriod = [self intFromConf:@"jy_pwm_period_s" fallback:20];
     self.periodControl.selectedSegmentIndex = (pwmPeriod >= 40) ? 1 : 0;
     [self renderSession];
+    [self renderFullChargeSchedule];
 
     self.applyingRemoteValues = NO;
 }
 
 - (void)updateMaxLabel {
-    self.maxValueLabel.text = [NSString stringWithFormat:@"%d%%", (int)lroundf(self.maxSlider.value)];
+    int pct = (int)lroundf(self.maxSlider.value);
+    self.maxValueLabel.text = [NSString stringWithFormat:@"%d%%", pct];
+
+    // 拖动时实时预览：用 daemon 暴露的当前速率在本地估算，不额外发请求。
+    double rate = [self doubleFromConf:@"jy_eta_rate" fallback:0];
+    double rawCur = [self.batInfo[@"AppleRawCurrentCapacity"] doubleValue];
+    double rawMax = [self.batInfo[@"AppleRawMaxCapacity"] doubleValue];
+    if (rate > 0.3 && rawMax > 0 && rawCur > 0) {
+        double remain = rawMax * (double)pct / 100.0 - rawCur;
+        if (remain > 0) {
+            NSInteger mins = (NSInteger)lround(remain / rate);
+            NSString *t = (mins < 60)
+                ? [NSString stringWithFormat:@"%ld 分钟", (long)mins]
+                : [NSString stringWithFormat:@"%ld 小时 %ld 分", (long)(mins / 60), (long)(mins % 60)];
+            self.maxDescLabel.text = [NSString stringWithFormat:@"预计还需约 %@（按当前速率）", t];
+            return;
+        }
+        self.maxDescLabel.text = @"当前电量已达到该目标";
+        return;
+    }
+    self.maxDescLabel.text = @"达到该电量后停止充电，回落 5% 后恢复";
 }
 
 - (void)updateStartLabel {

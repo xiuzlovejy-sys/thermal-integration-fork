@@ -152,6 +152,12 @@ static double g_sessLastPeak = 0;
 static double g_sessLastAvg = 0;
 static double g_sessLastMah = 0;
 static int g_sessLastCycles = 0;
+// 会话持久化字段
+static int g_sessStartSoc = 0;
+static int g_sessEndSoc = 0;
+static long long g_sessAdapterMa = 0;   // 本次会话充相峰值电流（适配器能力代理）
+static int g_sessHealthPct = 0;         // Nominal/Design × 100
+static double g_etaRateMahPerMin = 0;   // 最近一次 ETA 速率（供 App 预览计算）
 // P2 剩余充电时间估算（只读，不干预控制）：滑动窗口采样。
 static NSMutableArray* g_etaAmpSamples = nil;  // 充电相电流样本（mA）
 static NSTimeInterval g_etaLastChargingTs = 0; // 最近一次"确实在充"的时间
@@ -342,15 +348,15 @@ static BOOL isFullChargeScheduleEnabled() {
 }
 
 static int getFullChargeScheduleIntervalDays() {
-    return clampIntValue(getLocalInt(@"full_charge_sched_interval_days", 7), 1, 90);
+    return clampIntValue(getLocalInt(@"full_charge_sched_interval_days", 30), 1, 90);
 }
 
 static int getFullChargeScheduleStartMinute() {
-    return clampIntValue(getLocalInt(@"full_charge_sched_start_minute", 120), 0, 23 * 60 + 59);
+    return clampIntValue(getLocalInt(@"full_charge_sched_start_minute", 180), 0, 23 * 60 + 59);
 }
 
 static int getFullChargeScheduleDurationHours() {
-    return clampIntValue(getLocalInt(@"full_charge_sched_duration_hours", 4), 1, 12);
+    return clampIntValue(getLocalInt(@"full_charge_sched_duration_hours", 3), 1, 12);
 }
 
 static BOOL isHoldModeEnabled() {
@@ -3872,6 +3878,18 @@ static void initDB(NSString* batId) {
                     sqlite3_free(err);
                 }
             }
+            // 充电会话历史（长期电池健康追踪）：每次插电一行。
+            {
+                const char* sql = "create table if not exists jy_sessions ("
+                    "id integer primary key autoincrement,"
+                    "start_ts integer not null, end_ts integer not null,"
+                    "start_soc integer, end_soc integer,"
+                    "peak_temp real, avg_temp real, mah_added real,"
+                    "cycles integer, adapter_ma integer, health_pct integer)";
+                char* err = NULL;
+                sqlite3_exec(db, sql, NULL, NULL, &err);
+                if (err != NULL) sqlite3_free(err);
+            }
         }
     }
 }
@@ -4022,6 +4040,61 @@ static NSMutableDictionary* getFilteredMDic(NSDictionary* dic, NSArray* filter) 
         }
     }
     return mdic;
+}
+
+// 充电会话落库（仅本地，不上传）。
+static void insertJYSession(int startSoc, int endSoc, double peakTemp, double avgTemp,
+                            double mahAdded, int cycles, long long adapterMa, int healthPct) {
+    CL_DB_GUARD();
+    if (!db) return;
+    const char *sql = "insert into jy_sessions "
+        "(start_ts,end_ts,start_soc,end_soc,peak_temp,avg_temp,mah_added,cycles,adapter_ma,health_pct) "
+        "values (?,?,?,?,?,?,?,?,?,?)";
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK || stmt == NULL) return;
+    sqlite3_bind_int64(stmt, 1, (sqlite3_int64)g_sessStartTs);
+    sqlite3_bind_int64(stmt, 2, (sqlite3_int64)time(0));
+    sqlite3_bind_int(stmt, 3, startSoc);
+    sqlite3_bind_int(stmt, 4, endSoc);
+    sqlite3_bind_double(stmt, 5, peakTemp);
+    sqlite3_bind_double(stmt, 6, avgTemp);
+    sqlite3_bind_double(stmt, 7, mahAdded);
+    sqlite3_bind_int(stmt, 8, cycles);
+    sqlite3_bind_int64(stmt, 9, (sqlite3_int64)adapterMa);
+    sqlite3_bind_int(stmt, 10, healthPct);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+}
+
+// 读取最近的充电会话（新→旧）。
+static NSArray* getJYSessions(int limit) {
+    CL_DB_GUARD();
+    NSMutableArray *rows = [NSMutableArray array];
+    if (!db) return rows;
+    if (limit <= 0) limit = 20;
+    if (limit > 200) limit = 200;
+    const char *sql = "select id,start_ts,end_ts,start_soc,end_soc,peak_temp,avg_temp,"
+        "mah_added,cycles,adapter_ma,health_pct from jy_sessions order by id desc limit ?";
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK || stmt == NULL) return rows;
+    sqlite3_bind_int(stmt, 1, limit);
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        [rows addObject:@{
+            @"id": @(sqlite3_column_int(stmt, 0)),
+            @"start_ts": @(sqlite3_column_int64(stmt, 1)),
+            @"end_ts": @(sqlite3_column_int64(stmt, 2)),
+            @"start_soc": @(sqlite3_column_int(stmt, 3)),
+            @"end_soc": @(sqlite3_column_int(stmt, 4)),
+            @"peak_temp": @(sqlite3_column_double(stmt, 5)),
+            @"avg_temp": @(sqlite3_column_double(stmt, 6)),
+            @"mah_added": @(sqlite3_column_double(stmt, 7)),
+            @"cycles": @(sqlite3_column_int(stmt, 8)),
+            @"adapter_ma": @(sqlite3_column_int64(stmt, 9)),
+            @"health_pct": @(sqlite3_column_int(stmt, 10)),
+        }];
+    }
+    sqlite3_finalize(stmt);
+    return rows;
 }
 
 static void updateStatistics() {
@@ -5036,6 +5109,20 @@ static void updateChargeETA(void) {
         g_etaConfidence = @"low";
         return;
     }
+    g_etaRateMahPerMin = rateMahPerMin;   // 供 App 拖动上限时本地预览
+
+    // 健康度修正：只在接近目标（>80%）时生效。
+    // 低健康度 = 内阻更高、CV taper 更早更陡，未来速率会比当前观测值掉得更多。
+    // 只做温和放大（最多 +15% 时长），避免过度拟合；中段不参与。
+    double designCap = [safe[@"DesignCapacity"] doubleValue];
+    double nominalCap = [safe[@"NominalChargeCapacity"] doubleValue];
+    if (designCap > 0 && nominalCap > 0 && socPct > 80.0) {
+        double health = MIN(1.0, nominalCap / designCap);
+        if (health < 0.90) {
+            double factor = 1.0 + MIN(0.15, (0.90 - health) * 0.75);
+            rateMahPerMin /= factor;   // 速率下调 → 预计时间变长
+        }
+    }
 
     double remainSec = remainMah / rateMahPerMin * 60.0;
     double deadline = nowTs + remainSec;
@@ -5155,6 +5242,7 @@ static void updateChargeSession(void) {
     BOOL external = [safe[@"ExternalConnected"] boolValue];
     double temp = [safe[@"Temperature"] doubleValue] / 100.0;
     double mah = [safe[@"AppleRawCurrentCapacity"] doubleValue];
+    long long amp = [safe[@"InstantAmperage"] longLongValue];
 
     if (!external) {
         if (g_sessActive) {
@@ -5163,6 +5251,12 @@ static void updateChargeSession(void) {
             g_sessLastAvg = g_sessTempN ? (g_sessTempSum / g_sessTempN) : 0;
             g_sessLastMah = mah > 0 ? (mah - g_sessStartMah) : 0;
             g_sessLastCycles = g_sessPwmCycles;
+            g_sessEndSoc = [safe[@"CurrentCapacity"] intValue];
+            // 会话落库：长期追踪电池老化（仅本地）。
+            insertJYSession(g_sessStartSoc, g_sessEndSoc,
+                            g_sessPeakTemp, g_sessLastAvg,
+                            g_sessLastMah, g_sessPwmCycles,
+                            g_sessAdapterMa, g_sessHealthPct);
             g_sessActive = NO;
         }
         return;
@@ -5175,6 +5269,15 @@ static void updateChargeSession(void) {
         g_sessTempN = 1;
         g_sessStartMah = mah;
         g_sessPwmCycles = 0;
+        g_sessStartSoc = [safe[@"CurrentCapacity"] intValue];
+        g_sessEndSoc = g_sessStartSoc;
+        g_sessAdapterMa = 0;
+        // 健康度 = 当前满充容量 / 设计容量（PeakCapacity 在 iOS 16 上不暴露）。
+        double design = [safe[@"DesignCapacity"] doubleValue];
+        double nominal = [safe[@"NominalChargeCapacity"] doubleValue];
+        if (design <= 0) design = [safe[@"AppleRawMaxCapacity"] doubleValue];
+        g_sessHealthPct = (design > 0 && nominal > 0)
+                              ? (int)lround(MIN(100.0, nominal / design * 100.0)) : 0;
         return;
     }
     if (temp > 0 && temp < 90) {
@@ -5182,6 +5285,10 @@ static void updateChargeSession(void) {
         g_sessTempSum += temp;
         g_sessTempN++;
     }
+    // 充相峰值电流：作为适配器能力的代理（不做修正因子，只入历史）。
+    if (amp > g_sessAdapterMa) g_sessAdapterMa = amp;
+    int soc = [safe[@"CurrentCapacity"] intValue];
+    if (soc > 0) g_sessEndSoc = soc;
 }
 
 static void CLThermalPwmTick(void) {
@@ -5788,6 +5895,13 @@ NSDictionary* handleReq(NSDictionary* nsreq) {
             kv[@"jy_gov_amp"] = govState[@"amp_ma"] ?: @0;
             kv[@"jy_gov_charging"] = govState[@"charging"] ?: @NO;
             kv[@"jy_gov_duty"] = govState[@"pwm_duty"] ?: @1;   // 供曲线图读取真实占空比
+            kv[@"jy_eta_rate"] = @(g_etaRateMahPerMin);          // App 拖动上限时做本地预览
+            {
+                double design = [bat_info[@"DesignCapacity"] doubleValue];
+                double nominal = [bat_info[@"NominalChargeCapacity"] doubleValue];
+                kv[@"jy_batt_health"] = (design > 0 && nominal > 0)
+                    ? @(MIN(100.0, nominal / design * 100.0)) : @0;
+            }
             // 系统暂停充电识别：插着、没在充、又不是我们的容量停充
             // → 多半是 iOS「优化电池充电」/系统温控在 hold，界面据此给出提示。
             BOOL sysPause = [bat_info[@"ExternalConnected"] boolValue] &&
@@ -6334,6 +6448,9 @@ NSDictionary* handleReq(NSDictionary* nsreq) {
             @"status": @0,
             @"data": getPolicyEventDBData(n, lastID),
         };
+    } else if ([api isEqualToString:@"get_jy_sessions"]) {
+        int n = [nsreq[@"n"] respondsToSelector:@selector(intValue)] ? [nsreq[@"n"] intValue] : 20;
+        return @{ @"status": @0, @"data": getJYSessions(n) };
     } else if ([api isEqualToString:@"clear_statistics"]) {
         clearAllStatisticsData();
         return @{

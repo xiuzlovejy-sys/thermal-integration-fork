@@ -22,4 +22,14 @@ cp "$SRC_DIR/zh-Hans.lproj/Localizable.strings" "$L10N_DIR/"
 
 python3 "$SRC_DIR/patch_tt100.py" "$TT100_DIR/TT100.m"
 
+# 版本后缀：定制版与官方 1.0.2 区分开，Sileo 才能正确比较/显示，
+# 也方便确认"装的到底是哪一个构建"。
+CONTROL="$JIKAN_DIR/layout/DEBIAN/control"
+if [ -f "$CONTROL" ] && grep -q '^Version: 1\.0\.2$' "$CONTROL"; then
+    TMP_CONTROL="$(mktemp)"
+    sed 's/^Version: 1\.0\.2$/Version: 1.0.2-jys1/' "$CONTROL" > "$TMP_CONTROL"
+    mv "$TMP_CONTROL" "$CONTROL"
+    echo "[patch] package version -> 1.0.2-jys1"
+fi
+
 echo "[patch] applied to $JIKAN_DIR"
