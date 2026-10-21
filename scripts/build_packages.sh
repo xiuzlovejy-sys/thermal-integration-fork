@@ -306,15 +306,22 @@ build_tweak_dylib() {
   TWEAK_ARCH="$1"
   TWEAK_OUT="$2"
   plutil -lint "$TWEAK_SRC_DIR/$TWEAK_NAME.plist" >/dev/null
+  # RootHide 注入需要 tweak 链接 libroot（-lroothide），否则 ellekit 不注入
+  # （真机 2.0.158 CPUthermal 能注入、我们不注入的差异即在此）。
+  local LROOT=""
+  if [ -f "/opt/theos/vendor/lib/libroothide.tbd" ]; then
+    LROOT="-L/opt/theos/vendor/lib -lroothide -I/opt/theos/vendor/include"
+  fi
   xcrun -sdk iphoneos clang -dynamiclib \
     -arch "$TWEAK_ARCH" \
     -fobjc-arc \
     -miphoneos-version-min=11.0 \
     -framework Foundation \
+    $LROOT \
     "$ROOT_DIR/ChargeLimiter/IOKit.tbd" \
     "$TWEAK_SRC_DIR/CLThermalSimTweak.m" \
     -o "$TWEAK_OUT"
-  ldid -S "$TWEAK_OUT"
+  ldid -S"$TWEAK_SRC_DIR/$TWEAK_NAME.entitlements" "$TWEAK_OUT"
 }
 
 stage_tweak_files() {
