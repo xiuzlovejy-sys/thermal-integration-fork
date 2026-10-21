@@ -4975,20 +4975,20 @@ static void updateChargeETA(void) {
 
     g_etaLastChargingTs = nowTs;
 
-    // 采样：充电相电流（mA）。速率直接用 电流 × 占空比 计算——
-    // 比"Raw 容量差"可靠得多：容量表在 80% 附近按 1% 阶梯缓慢更新，
-    // 用容量差会把速率严重低估（真机 79%→80% 曾误报 24 分钟）。
+    // 记录"有效电流" = 充相电流 × 采样当时的占空比。
+    // 不能只存电流、最后再乘当前 duty：窗口内温度变化会让 duty 改变，
+    // 那样等于用"现在的占空比"去解释"过去的电流"，ETA 会偏。
+    float duty = (g_jyLastDuty > 0.02f && g_jyLastDuty <= 1.0f) ? g_jyLastDuty : 1.0f;
     if (g_etaAmpSamples == nil) g_etaAmpSamples = [NSMutableArray array];
-    [g_etaAmpSamples addObject:@(amp)];
+    [g_etaAmpSamples addObject:@((double)amp * (double)duty)];
     while (g_etaAmpSamples.count > 24) [g_etaAmpSamples removeObjectAtIndex:0];   // 约 6 分钟（15s/次）
 
-    double ampSum = 0;
-    for (NSNumber *v in g_etaAmpSamples) ampSum += [v doubleValue];
-    double avgAmp = g_etaAmpSamples.count ? ampSum / (double)g_etaAmpSamples.count : 0;
+    double effSum = 0;
+    for (NSNumber *v in g_etaAmpSamples) effSum += [v doubleValue];
+    double avgEffAmp = g_etaAmpSamples.count ? effSum / (double)g_etaAmpSamples.count : 0;
 
-    // 有效平均速率（mAh/min）= 充电相电流(mA) × 占空比 ÷ 60
-    float duty = (g_jyLastDuty > 0.02f && g_jyLastDuty <= 1.0f) ? g_jyLastDuty : 1.0f;
-    double rateMahPerMin = (avgAmp * (double)duty) / 60.0;
+    // 有效平均速率（mAh/min）= 有效平均电流 ÷ 60
+    double rateMahPerMin = avgEffAmp / 60.0;
 
     if (rateMahPerMin <= 0.3) {
         g_etaMinutes = -1;
@@ -4997,7 +4997,14 @@ static void updateChargeETA(void) {
         return;
     }
 
-    g_etaMinutes = (NSInteger)lround(remainMah / rateMahPerMin);
+    NSInteger eta = (NSInteger)lround(remainMah / rateMahPerMin);
+    if (eta < 1) eta = 1;
+    // 显示平滑：PWM 与 15s 采样会让原始估计跳变；向旧值收敛 35% 即可稳住界面，
+    // 又不会长期偏离（每轮都会重新逼近真实值）。
+    if (g_etaMinutes > 0 && labs((long)(eta - g_etaMinutes)) < 60) {
+        eta = (NSInteger)lround(0.65 * (double)eta + 0.35 * (double)g_etaMinutes);
+    }
+    g_etaMinutes = eta;
     // 高 SOC 段电流会继续 taper，ETA 天然偏低；降置信度提示。
     g_etaConfidence = (socPct > 80 || g_etaAmpSamples.count < 4) ? @"medium" : @"high";
     g_etaState = @"charging";

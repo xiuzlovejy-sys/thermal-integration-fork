@@ -1,0 +1,66 @@
+name: build-jikan-patched
+
+# 构建「外部 ETA 优先」的 Jikan 1.0.2（Jy's charge 定制版）。
+# 产物：jikan-jys-<scheme>-deb（roothide / rootless 各一份）。
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "jikan-patch/**"
+      - ".github/workflows/build-jikan-patched.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        scheme: [roothide, rootless]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Clone Jikan 1.0.2
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch 1.0.2 https://github.com/waruhachi/Jikan "$RUNNER_TEMP/jikan"
+
+      - name: Apply external-ETA patch
+        run: bash jikan-patch/apply.sh "$RUNNER_TEMP/jikan"
+
+      - name: Install Theos (roothide fork)
+        run: |
+          set -euo pipefail
+          sudo mkdir -p /opt/theos
+          sudo git clone --depth 1 --recursive https://github.com/roothide/theos /opt/theos
+          sudo chown -R "$(whoami)" /opt/theos
+
+      - name: Build package (${{ matrix.scheme }})
+        env:
+          THEOS: /opt/theos
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/jikan"
+          make clean || true
+          make package \
+            THEOS_PACKAGE_SCHEME=${{ matrix.scheme }} \
+            FINALPACKAGE=1 \
+            TARGET=iphone:clang:latest:14.0 \
+            DEBUG=0
+
+      - name: Collect deb
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/out"
+          find "$RUNNER_TEMP/jikan" -name "*.deb" -maxdepth 3 -exec cp {} "$RUNNER_TEMP/out/" \;
+          ls -l "$RUNNER_TEMP/out"
+
+      - name: Upload deb
+        uses: actions/upload-artifact@v4
+        with:
+          name: jikan-jys-${{ matrix.scheme }}-deb
+          path: ${{ runner.temp }}/out/*.deb
+          if-no-files-found: error
