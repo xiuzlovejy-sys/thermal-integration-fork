@@ -305,26 +305,22 @@ sign_roothide_app() {
 build_tweak_dylib() {
   TWEAK_OUT="$1"
   plutil -lint "$TWEAK_SRC_DIR/$TWEAK_NAME.plist" >/dev/null
-  # RootHide 注入需要 tweak 链接 libroot（-lroothide），否则 ellekit 不注入
-  # （真机 2.0.158 CPUthermal 能注入、我们不注入的差异即在此）。
-  local LROOT=""
-  if [ -f "/opt/theos/vendor/lib/libroothide.tbd" ]; then
-    LROOT="-L/opt/theos/vendor/lib -lroothide -I/opt/theos/vendor/include"
+  # theos 构建（CPUthermal 同款）：fat 双架构 + substrate %%ctor + roothide 签名 + libroot。
+  ( cd "$TWEAK_SRC_DIR" && make THEOS=/opt/theos THEOS_PACKAGE_SCHEME=roothide clean package >/tmp/theos_tweak_build.log 2>&1 )
+  local rc=$?
+  if [ $rc -ne 0 ]; then
+    echo "[ERR] theos tweak build failed" >&2
+    tail -30 /tmp/theos_tweak_build.log >&2
+    exit 1
   fi
-  xcrun -sdk iphoneos clang -dynamiclib \
-    -arch arm64 -arch arm64e \
-    -fobjc-arc \
-    -miphoneos-version-min=14.0 \
-    -framework Foundation \
-    $LROOT \
-    "$ROOT_DIR/ChargeLimiter/IOKit.tbd" \
-    "$TWEAK_SRC_DIR/CLThermalSimTweak.m" \
-    -o "$TWEAK_OUT"
-  # 无 entitlements 假签名（对齐 CTHermes），再追加 roothide 兼容合并。
-  ldid -S "$TWEAK_OUT"
-  if [ -f "$ROOTHIDE_MERGE_ENT" ]; then
-    ldid -M "-S$ROOTHIDE_MERGE_ENT" "$TWEAK_OUT"
+  local DYLIB=$(find "$TWEAK_SRC_DIR" -path "*MobileSubstrate/DynamicLibraries/CLThermalSim.dylib" -type f 2>/dev/null | head -1)
+  if [ -z "$DYLIB" ]; then
+    echo "[ERR] tweak dylib not found after theos package" >&2
+    find "$TWEAK_SRC_DIR" -name "*.dylib" 2>/dev/null | head -5 >&2
+    exit 1
   fi
+  cp -p "$DYLIB" "$TWEAK_OUT"
+  echo "[tweak] theos built + staged"
 }
 
 stage_tweak_files() {
