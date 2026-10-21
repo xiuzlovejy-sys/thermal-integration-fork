@@ -594,7 +594,9 @@ if [ "$BUILD_ROOTFUL_PKG" = "1" ] || [ "$BUILD_ROOTLESS_PKG" = "1" ]; then
   mkdir -p "$STAGE_ROOTFUL_DIR/Applications"
   mkdir -p "$STAGE_ROOTLESS_DIR/var/jb/Applications"
   cp -a "$ROOTFUL_APP" "$STAGE_ROOTFUL_DIR/Applications/ChargeLimiter.app"
+  cp -p "$ROOT_DIR/packaging/Icon.png" "$ROOT_DIR/packaging/Icon@2x.png" "$STAGE_ROOTFUL_DIR/Applications/ChargeLimiter.app/"
   cp -a "$ROOTLESS_APP" "$STAGE_ROOTLESS_DIR/var/jb/Applications/ChargeLimiter.app"
+  cp -p "$ROOT_DIR/packaging/Icon.png" "$ROOT_DIR/packaging/Icon@2x.png" "$STAGE_ROOTLESS_DIR/var/jb/Applications/ChargeLimiter.app/"
 
   stage_tweak_files "$STAGE_ROOTFUL_DIR" "$TWEAK_STAGE_DIR/$TWEAK_NAME.dylib"
   stage_tweak_files "$STAGE_ROOTLESS_DIR/var/jb" "$TWEAK_STAGE_DIR/$TWEAK_NAME.dylib"
@@ -628,6 +630,7 @@ if [ "$BUILD_NATIVE_ROOTHIDE" = "1" ]; then
   rm -rf "$STAGE_ROOTHIDE_DIR/Applications/ChargeLimiter.app"
   mkdir -p "$STAGE_ROOTHIDE_DIR/Applications"
   cp -a "$ROOTHIDE_APP" "$STAGE_ROOTHIDE_DIR/Applications/ChargeLimiter.app"
+  cp -p "$ROOT_DIR/packaging/Icon.png" "$ROOT_DIR/packaging/Icon@2x.png" "$STAGE_ROOTHIDE_DIR/Applications/ChargeLimiter.app/"
   stage_tweak_files "$STAGE_ROOTHIDE_DIR" "$TWEAK_STAGE_DIR/$TWEAK_NAME-arm64e.dylib"
   clean_host_metadata "$STAGE_ROOTHIDE_DIR"
   chmod 755 "$STAGE_ROOTHIDE_DIR/DEBIAN"
@@ -642,6 +645,7 @@ fi
 if [ "$BUILD_ROOTLESS_PKG" = "1" ]; then
   echo "[8/10] Build TrollStore package..."
   cp -a "$ROOTLESS_APP" "$PAYLOAD_DIR/ChargeLimiter.app"
+  cp -p "$ROOT_DIR/packaging/Icon.png" "$ROOT_DIR/packaging/Icon@2x.png" "$PAYLOAD_DIR/ChargeLimiter.app/"
   sign_app "$PAYLOAD_DIR/ChargeLimiter.app" "$APP_ENT_TS"
   clean_host_metadata "$PAYLOAD_DIR"
   (

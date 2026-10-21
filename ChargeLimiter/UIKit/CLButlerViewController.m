@@ -174,6 +174,9 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
 // 浮动提示（覆盖层，不随滚动）
 @property (nonatomic, strong) UIView *toastView;
 @property (nonatomic, strong) UILabel *toastLabel;
+// 动效
+@property (nonatomic, strong) UIStackView *cardStack;
+@property (nonatomic, assign) BOOL didPlayEntrance;
 // 运行日志面板（默认折叠）
 @property (nonatomic, strong) UITextView *logTextView;
 @property (nonatomic, strong) UILabel *logInfoLabel;
@@ -259,6 +262,28 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
 
 @implementation CLButlerViewController
 
+- (void)viewDidAppear:(BOOL)animated {
+    [super viewDidAppear:animated];
+    if (self.didPlayEntrance) return;
+    self.didPlayEntrance = YES;
+    // 入场：卡片自下而上浮现，按顺序轻微错峰（40ms），克制不拖沓。
+    NSArray<UIView *> *cards = self.cardStack.arrangedSubviews;
+    for (NSUInteger i = 0; i < cards.count; i++) {
+        UIView *card = cards[i];
+        card.alpha = 0.0;
+        card.transform = CGAffineTransformMakeTranslation(0, 14);
+        [UIView animateWithDuration:0.42
+                              delay:0.04 * (NSTimeInterval)i
+             usingSpringWithDamping:0.92
+              initialSpringVelocity:0.2
+                            options:UIViewAnimationOptionAllowUserInteraction
+                         animations:^{
+            card.alpha = 1.0;
+            card.transform = CGAffineTransformIdentity;
+        } completion:nil];
+    }
+}
+
 - (void)viewDidLoad {
     [super viewDidLoad];
     if (@available(iOS 13.0, *)) {
@@ -342,6 +367,7 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
     [self.view addSubview:scroll];
 
     UIStackView *stack = [[UIStackView alloc] init];
+    self.cardStack = stack;
     stack.translatesAutoresizingMaskIntoConstraints = NO;
     stack.axis = UILayoutConstraintAxisVertical;
     stack.spacing = 14;
@@ -457,6 +483,7 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
     self.urgentButton.layer.cornerRadius = 12;
     self.urgentButton.contentEdgeInsets = UIEdgeInsetsMake(6, 12, 6, 12);
     [self.urgentButton addTarget:self action:@selector(urgentTopUp:) forControlEvents:UIControlEventTouchUpInside];
+    [self attachPressAnimation:self.urgentButton];
     [switchCard addSubview:self.urgentButton];
 
     // 顺滑优先 / 少启停优先：只改 PWM 周期（20s / 60s），平均功率不变。
@@ -524,6 +551,7 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
     self.jikanButton.contentEdgeInsets = UIEdgeInsetsMake(6, 12, 6, 12);
     [self.jikanButton addTarget:self action:@selector(syncToJikan:)
                forControlEvents:UIControlEventTouchUpInside];
+    [self attachPressAnimation:self.jikanButton];
     [maxCard addSubview:self.jikanButton];
     [NSLayoutConstraint activateConstraints:@[
         [maxTitle.topAnchor constraintEqualToAnchor:maxCard.topAnchor constant:18],
@@ -1164,12 +1192,15 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
     for (NSDictionary *r in rows) {
         NSTimeInterval s = [r[@"start_ts"] doubleValue];
         NSTimeInterval e = [r[@"end_ts"] doubleValue];
-        NSString *line = [NSString stringWithFormat:@"%@ → %@   %@%%→%@%%\n峰值 %.1f℃ · %.0fmAh · 启停 %@ 次",
+        NSInteger health = [r[@"health_pct"] integerValue];
+        NSString *healthText = (health > 0) ? [NSString stringWithFormat:@"%ld%%", (long)health] : @"--";
+        NSString *line = [NSString stringWithFormat:
+                          @"%@ → %@   %@%%→%@%%\n峰值 %.1f℃ · 平均 %.1f℃ · %.0fmAh · 健康 %@",
                           [df stringFromDate:[NSDate dateWithTimeIntervalSince1970:s]],
                           [df stringFromDate:[NSDate dateWithTimeIntervalSince1970:e]],
                           r[@"start_soc"] ?: @0, r[@"end_soc"] ?: @0,
-                          [r[@"peak_temp"] doubleValue], [r[@"mah_added"] doubleValue],
-                          r[@"cycles"] ?: @0];
+                          [r[@"peak_temp"] doubleValue], [r[@"avg_temp"] doubleValue],
+                          [r[@"mah_added"] doubleValue], healthText];
         UILabel *row = [self label:line size:11 weight:UIFontWeightRegular color:CLColorSub()];
         row.numberOfLines = 0;
         [self.historyStack addArrangedSubview:row];
@@ -1408,6 +1439,26 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
     }];
 }
 
+- (void)attachPressAnimation:(UIButton *)button {
+    [button addTarget:self action:@selector(pressDown:) forControlEvents:UIControlEventTouchDown];
+    [button addTarget:self action:@selector(pressUp:)
+     forControlEvents:(UIControlEventTouchUpInside | UIControlEventTouchUpOutside | UIControlEventTouchCancel)];
+}
+
+- (void)pressDown:(UIButton *)button {
+    [UIView animateWithDuration:0.12 delay:0 options:UIViewAnimationOptionBeginFromCurrentState animations:^{
+        button.transform = CGAffineTransformMakeScale(0.96, 0.96);
+    } completion:nil];
+}
+
+- (void)pressUp:(UIButton *)button {
+    [UIView animateWithDuration:0.28 delay:0 usingSpringWithDamping:0.55 initialSpringVelocity:0.4
+                        options:UIViewAnimationOptionBeginFromCurrentState
+                     animations:^{
+        button.transform = CGAffineTransformIdentity;
+    } completion:nil];
+}
+
 - (void)showStatus:(NSString *)text ok:(BOOL)ok {
     if (self.toastView == nil) return;
     self.toastLabel.text = text;
@@ -1416,9 +1467,13 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
     self.toastView.layer.borderColor = tint.CGColor;
     [self.view bringSubviewToFront:self.toastView];
     [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(clearStatus) object:nil];
-    [UIView animateWithDuration:0.18 animations:^{
+    self.toastView.transform = CGAffineTransformMakeTranslation(0, 8);
+    [UIView animateWithDuration:0.24 delay:0 usingSpringWithDamping:0.85 initialSpringVelocity:0.3
+                        options:UIViewAnimationOptionAllowUserInteraction
+                     animations:^{
         self.toastView.alpha = 1.0;
-    }];
+        self.toastView.transform = CGAffineTransformIdentity;
+    } completion:nil];
     // 成功 2 秒、失败 3.5 秒：错误需要更久的阅读时间。
     [self performSelector:@selector(clearStatus) withObject:nil afterDelay:(ok ? 2.0 : 3.5)];
 }

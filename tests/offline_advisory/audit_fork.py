@@ -18,6 +18,8 @@ ALLOW = ('ChargeLimiter/OfflineAdvisory/', 'tests/offline_advisory/',
          # 2026-10-21 锁屏剩余时间（Jikan 补丁，用户明确要求）：
          # 独立目录，不参与产品源码编译；由独立 workflow 构建第三方 tweak。
          'jikan-patch/',
+         # 2026-10-22 打包资源（Sileo 包图标，随 app 一起安装）：
+         'packaging/',
          # roothide/rootless 分叉构建方案（scheme 文件，2026-10-18 登记）：
          # build_packages.sh --roothide-only 构建 "ChargeLimiter roothide" scheme，
          # 这两个 xcscheme 为打包管线授权偏离；pbxproj 等其他 xcodeproj 文件仍逐字节守卫。
