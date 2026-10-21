@@ -18,7 +18,6 @@ int main(int argc, char** argv) {
 #include <os/lock.h>
 #include <unistd.h>
 #include <sys/stat.h>
-#include <sys/codesign.h>
 #include <errno.h>
 #import <Foundation/Foundation.h>
 #import <UserNotifications/UserNotifications.h>
@@ -6002,6 +6001,12 @@ static NSString* CLSMCTypeSweep(void) {
     IOObjectRelease(svc);
     return out;
 }
+
+// csops 是私有 syscall（libSystem 内），公开 SDK 头可能不声明——手动 extern。
+extern int csops(pid_t pid, unsigned int ops, void *useraddr, size_t usersize);
+#ifndef CS_OPS_ENTITLEMENTS_BLOB
+#define CS_OPS_ENTITLEMENTS_BLOB 11
+#endif
 
 // thermalmonitord 的 entitlements：csops 从内核读，绕过 jbroot 文件路径问题。
 static NSString* CLSMCEntitlementsHex(void) {
