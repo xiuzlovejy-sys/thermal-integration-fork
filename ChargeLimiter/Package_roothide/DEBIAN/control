@@ -1,6 +1,6 @@
 Package: com.jy.charge
 Name: Jy's charge
-Version: 1.0.58
+Version: 2.0.2
 Description: 柔性温控充电：按温度实时调节充电功率，并可按电量上限停止充电
 Section: Applications
 Depends: firmware (>= 13.0)
@@ -9,3 +9,5 @@ Architecture: iphoneos-arm64e
 Author: xiuzlove
 Maintainer: xiuzlove
 Icon: file:///Applications/ChargeLimiter.app/Icon.png
+Conflicts: moe.waru.jikan
+Replaces: moe.waru.jikan

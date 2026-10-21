@@ -193,8 +193,6 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
 @property (nonatomic, assign) NSTimeInterval curveLastSampleTs;
 // 紧急补电（定时暂停温控，到点自动恢复）
 @property (nonatomic, strong) UIButton *urgentButton;
-// 同步目标到 Jikan（锁屏剩余时间）
-@property (nonatomic, strong) UIButton *jikanButton;
 // 充电模式预设（护电/均衡/快充）
 @property (nonatomic, strong) UISegmentedControl *presetControl;
 // PWM 周期：顺滑优先(20s) / 少启停优先(60s)
@@ -243,7 +241,6 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
 - (void)updateDayCount;
 - (void)sampleCurveIfNeeded;
 - (void)urgentTopUp:(UIButton *)sender;
-- (void)syncToJikan:(UIButton *)sender;
 - (void)updateUrgentButton;
 - (void)presetChanged:(UISegmentedControl *)sender;
 - (void)periodChanged:(UISegmentedControl *)sender;
@@ -540,19 +537,6 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
     [maxCard addSubview:self.maxSlider];
     [maxCard addSubview:self.maxDescLabel];
 
-    // 同步目标到 Jikan：Jikan 负责锁屏渲染，我们只写它的偏好 + 发重载通知。
-    self.jikanButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    self.jikanButton.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.jikanButton setTitle:@"同步到 Jikan（锁屏剩余时间）" forState:UIControlStateNormal];
-    self.jikanButton.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
-    [self.jikanButton setTitleColor:CLColorTeal() forState:UIControlStateNormal];
-    self.jikanButton.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.06];
-    self.jikanButton.layer.cornerRadius = 12;
-    self.jikanButton.contentEdgeInsets = UIEdgeInsetsMake(6, 12, 6, 12);
-    [self.jikanButton addTarget:self action:@selector(syncToJikan:)
-               forControlEvents:UIControlEventTouchUpInside];
-    [self attachPressAnimation:self.jikanButton];
-    [maxCard addSubview:self.jikanButton];
     [NSLayoutConstraint activateConstraints:@[
         [maxTitle.topAnchor constraintEqualToAnchor:maxCard.topAnchor constant:18],
         [maxTitle.leadingAnchor constraintEqualToAnchor:maxCard.leadingAnchor constant:20],
@@ -568,10 +552,7 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
         [self.maxDescLabel.leadingAnchor constraintEqualToAnchor:maxTitle.leadingAnchor],
         [self.maxDescLabel.trailingAnchor constraintEqualToAnchor:maxCard.trailingAnchor constant:-20],
 
-        [self.jikanButton.topAnchor constraintEqualToAnchor:self.maxDescLabel.bottomAnchor constant:10],
-        [self.jikanButton.leadingAnchor constraintEqualToAnchor:maxTitle.leadingAnchor],
-        [self.jikanButton.heightAnchor constraintEqualToConstant:30],
-        [self.jikanButton.bottomAnchor constraintEqualToAnchor:maxCard.bottomAnchor constant:-16],
+        [self.maxDescLabel.bottomAnchor constraintEqualToAnchor:maxCard.bottomAnchor constant:-18],
     ]];
 
     // ---- 充电模式（预设）----
@@ -1083,35 +1064,6 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
     [self updateUrgentButton];
 }
 
-// 同步目标到 Jikan：检测与写入都交给 daemon（root 权限 + 能解析 RootHide 的
-// .jbroot-XXXX 路径；App 侧只能看到沙盒视角，直接判断会误报"未安装"）。
-- (void)syncToJikan:(UIButton *)sender {
-    __weak typeof(self) weakSelf = self;
-    [[CLAPIClient shared] sendRequest:@{ @"api": @"jikan_sync" }
-                          completion:^(NSDictionary *response, NSError *error) {
-        __strong typeof(weakSelf) self = weakSelf;
-        if (self == nil) return;
-        if (error != nil) {
-            [self showStatus:@"同步失败：daemon 无响应" ok:NO];
-            return;
-        }
-        NSDictionary *data = [response[@"data"] isKindOfClass:[NSDictionary class]]
-                                 ? response[@"data"] : nil;
-        BOOL installed = [data[@"installed"] boolValue];
-        BOOL wrote = [data[@"wrote"] boolValue];
-        if (!installed) {
-            [self showStatus:@"未检测到 Jikan（已查 jbroot / var/jb / 根路径）" ok:NO];
-            return;
-        }
-        if (!wrote) {
-            [self showStatus:@"已找到 Jikan，但写入偏好失败" ok:NO];
-            return;
-        }
-        [self showStatus:[NSString stringWithFormat:@"已同步目标 %@%% 到 Jikan",
-                          data[@"max"] ?: @80] ok:YES];
-    }];
-}
-
 - (void)updateUrgentButton {
     NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
     NSInteger until = [self intFromConf:@"jy_urgent_until" fallback:0];
@@ -1192,15 +1144,13 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
     for (NSDictionary *r in rows) {
         NSTimeInterval s = [r[@"start_ts"] doubleValue];
         NSTimeInterval e = [r[@"end_ts"] doubleValue];
-        NSInteger health = [r[@"health_pct"] integerValue];
-        NSString *healthText = (health > 0) ? [NSString stringWithFormat:@"%ld%%", (long)health] : @"--";
         NSString *line = [NSString stringWithFormat:
-                          @"%@ → %@   %@%%→%@%%\n峰值 %.1f℃ · 平均 %.1f℃ · %.0fmAh · 健康 %@",
+                          @"%@ → %@   %@%%→%@%%\n峰值 %.1f℃ · 平均 %.1f℃ · %.0fmAh · 启停 %@ 次",
                           [df stringFromDate:[NSDate dateWithTimeIntervalSince1970:s]],
                           [df stringFromDate:[NSDate dateWithTimeIntervalSince1970:e]],
                           r[@"start_soc"] ?: @0, r[@"end_soc"] ?: @0,
                           [r[@"peak_temp"] doubleValue], [r[@"avg_temp"] doubleValue],
-                          [r[@"mah_added"] doubleValue], healthText];
+                          [r[@"mah_added"] doubleValue], r[@"cycles"] ?: @0];
         UILabel *row = [self label:line size:11 weight:UIFontWeightRegular color:CLColorSub()];
         row.numberOfLines = 0;
         [self.historyStack addArrangedSubview:row];

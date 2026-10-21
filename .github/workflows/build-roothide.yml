@@ -78,6 +78,29 @@ jobs:
         run: |
           brew install dpkg ldid ripgrep
 
+      # 锁屏充电胶囊：拉取已构建好的 patched Jikan，解包后交给打包脚本合并进本 deb。
+      # 找不到成功构建时只告警、不失败——保证主包始终可出。
+      - name: Fetch patched Jikan (lock-screen capsule)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          RID=$(gh run list --repo "${{ github.repository }}" --workflow build-jikan-patched --limit 10 \
+                  --json databaseId,conclusion \
+                  --jq '[.[] | select(.conclusion=="success")][0].databaseId // empty')
+          if [ -z "$RID" ]; then
+            echo "::warning::no successful build-jikan-patched run; capsule will not be bundled"
+            exit 0
+          fi
+          echo "Using Jikan build: $RID"
+          rm -rf /tmp/jikan-deb /tmp/jikan-bundle
+          mkdir -p /tmp/jikan-deb /tmp/jikan-bundle
+          gh run download "$RID" --repo "${{ github.repository }}" \
+            --name jikan-jys-roothide-deb -D /tmp/jikan-deb
+          dpkg-deb -x /tmp/jikan-deb/*.deb /tmp/jikan-bundle
+          test -n "$(find /tmp/jikan-bundle -name 'Jikan.dylib' -type f | head -1)"
+          echo "JIKAN_BUNDLE_DIR=/tmp/jikan-bundle" >> "$GITHUB_ENV"
+
       - name: Install Theos (roothide fork) to /opt/theos
         run: |
           set -euo pipefail
