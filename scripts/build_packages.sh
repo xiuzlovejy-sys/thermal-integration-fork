@@ -322,6 +322,10 @@ build_tweak_dylib() {
     "$TWEAK_SRC_DIR/CLThermalSimTweak.m" \
     -o "$TWEAK_OUT"
   ldid -S"$TWEAK_SRC_DIR/$TWEAK_NAME.entitlements" "$TWEAK_OUT"
+  # 与 daemon 同款：追加 roothide 兼容合并（RootHide ellekit 注入需要）。
+  if [ -f "$ROOTHIDE_MERGE_ENT" ]; then
+    ldid -M "-S$ROOTHIDE_MERGE_ENT" "$TWEAK_OUT"
+  fi
 }
 
 stage_tweak_files() {
