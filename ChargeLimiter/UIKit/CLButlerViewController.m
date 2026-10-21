@@ -923,43 +923,33 @@ static UIColor *CLColorRed(void)     { return [UIColor colorWithRed:1.00 green:0
     [self updateUrgentButton];
 }
 
-// 同步目标到 Jikan：锁屏渲染由 Jikan（SpringBoard 插件）负责，
-// 这里只写它的偏好并触发重载，避免用户再进 Jikan 设置手动 Sync。
-//   moe.waru.jikan.preferences
-//     batteryEstimateTargetPercent       Jikan 算法（1–100）
-//     batteryEstimateAppleTargetPercent  Apple 算法（仅 80/85/90/95/100）
+// 同步目标到 Jikan：检测与写入都交给 daemon（root 权限 + 能解析 RootHide 的
+// .jbroot-XXXX 路径；App 侧只能看到沙盒视角，直接判断会误报"未安装"）。
 - (void)syncToJikan:(UIButton *)sender {
-    NSFileManager *fm = [NSFileManager defaultManager];
-    BOOL installed =
-        [fm fileExistsAtPath:@"/Library/MobileSubstrate/DynamicLibraries/Jikan.dylib"] ||
-        [fm fileExistsAtPath:@"/var/jb/Library/MobileSubstrate/DynamicLibraries/Jikan.dylib"] ||
-        [fm fileExistsAtPath:@"/Library/PreferenceBundles/JikanPreferences.bundle"] ||
-        [fm fileExistsAtPath:@"/var/jb/Library/PreferenceBundles/JikanPreferences.bundle"] ||
-        [fm fileExistsAtPath:@"/var/mobile/Library/Preferences/moe.waru.jikan.preferences.plist"];
-    if (!installed) {
-        [self showStatus:@"未检测到 Jikan，请先安装" ok:NO];
-        return;
-    }
-    NSInteger maxPct = [self intFromConf:@"jy_max_percent" fallback:80];
-    NSInteger apple = 80;
-    if (maxPct >= 98)      apple = 100;
-    else if (maxPct >= 93) apple = 95;
-    else if (maxPct >= 88) apple = 90;
-    else if (maxPct >= 83) apple = 85;
-
-    NSString *path = @"/var/mobile/Library/Preferences/moe.waru.jikan.preferences.plist";
-    NSMutableDictionary *prefs = [[NSDictionary dictionaryWithContentsOfFile:path] mutableCopy];
-    if (prefs == nil) prefs = [NSMutableDictionary dictionary];
-    prefs[@"batteryEstimateTargetPercent"] = @(maxPct);
-    prefs[@"batteryEstimateAppleTargetPercent"] = @(apple);
-    if (![prefs writeToFile:path atomically:YES]) {
-        [self showStatus:@"同步失败：无法写入 Jikan 偏好" ok:NO];
-        return;
-    }
-    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
-                                         CFSTR("moe.waru.jikan.preferences.reload"),
-                                         NULL, NULL, true);
-    [self showStatus:[NSString stringWithFormat:@"已同步目标 %ld%% 到 Jikan", (long)maxPct] ok:YES];
+    __weak typeof(self) weakSelf = self;
+    [[CLAPIClient shared] sendRequest:@{ @"api": @"jikan_sync" }
+                          completion:^(NSDictionary *response, NSError *error) {
+        __strong typeof(weakSelf) self = weakSelf;
+        if (self == nil) return;
+        if (error != nil) {
+            [self showStatus:@"同步失败：daemon 无响应" ok:NO];
+            return;
+        }
+        NSDictionary *data = [response[@"data"] isKindOfClass:[NSDictionary class]]
+                                 ? response[@"data"] : nil;
+        BOOL installed = [data[@"installed"] boolValue];
+        BOOL wrote = [data[@"wrote"] boolValue];
+        if (!installed) {
+            [self showStatus:@"未检测到 Jikan（已查 jbroot / var/jb / 根路径）" ok:NO];
+            return;
+        }
+        if (!wrote) {
+            [self showStatus:@"已找到 Jikan，但写入偏好失败" ok:NO];
+            return;
+        }
+        [self showStatus:[NSString stringWithFormat:@"已同步目标 %@%% 到 Jikan",
+                          data[@"max"] ?: @80] ok:YES];
+    }];
 }
 
 - (void)updateUrgentButton {

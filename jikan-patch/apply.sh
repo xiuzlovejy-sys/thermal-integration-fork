@@ -15,6 +15,11 @@ TT100_DIR="$JIKAN_DIR/Tweak/TT100"
 cp "$SRC_DIR/TT100ExternalEstimate.h" "$TT100_DIR/"
 cp "$SRC_DIR/TT100ExternalEstimate.m" "$TT100_DIR/"
 
+# 中文界面：Jikan 把语言资源直接放在 layout 里打包（不是编译产物）。
+L10N_DIR="$JIKAN_DIR/layout/Library/Tweak Support/Jikan/Localization/zh-Hans.lproj"
+mkdir -p "$L10N_DIR"
+cp "$SRC_DIR/zh-Hans.lproj/Localizable.strings" "$L10N_DIR/"
+
 python3 "$SRC_DIR/patch_tt100.py" "$TT100_DIR/TT100.m"
 
 echo "[patch] applied to $JIKAN_DIR"

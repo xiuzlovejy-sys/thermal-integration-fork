@@ -17,6 +17,7 @@ int main(int argc, char** argv) {
 #include <pthread.h>
 #include <os/lock.h>
 #include <unistd.h>
+#include <sys/stat.h>
 #include <errno.h>
 #import <Foundation/Foundation.h>
 #import <UserNotifications/UserNotifications.h>
@@ -5661,6 +5662,67 @@ NSDictionary* handleReq(NSDictionary* nsreq) {
         return @{@"status": @0,
                  @"data": @{@"preset": name, @"max": @(maxPct),
                             @"rise_light": @(riseLight), @"duty": @(duty)}};
+    } else if ([api isEqualToString:@"jikan_sync"]) {
+        // 检测并同步目标到 Jikan。RootHide 的库不在 /var/jb，也不在根路径，
+        // 而是位于 .jbroot-XXXX 下，所以三个根都要试（App 侧无法可靠判断）。
+        NSString *jbRoot = CLDaemonJbRootPath() ?: @"";
+        NSFileManager *fm = [NSFileManager defaultManager];
+        NSArray<NSString *> *probes = @[
+            @"/Library/MobileSubstrate/DynamicLibraries/Jikan.dylib",
+            @"/Library/PreferenceBundles/JikanPreferences.bundle",
+            @"/Library/PreferenceLoader/Preferences/JikanPreferences.plist",
+        ];
+        NSString *found = nil;
+        for (NSString *rel in probes) {
+            NSMutableArray<NSString *> *cands = [NSMutableArray arrayWithObject:rel];
+            [cands addObject:[@"/var/jb" stringByAppendingString:rel]];
+            if (jbRoot.length > 0) [cands addObject:[jbRoot stringByAppendingString:rel]];
+            for (NSString *c in cands) {
+                if ([fm fileExistsAtPath:c]) { found = c; break; }
+            }
+            if (found) break;
+        }
+
+        NSString *prefsRel = @"/var/mobile/Library/Preferences/moe.waru.jikan.preferences.plist";
+        NSMutableArray<NSString *> *prefCands = [NSMutableArray array];
+        if (jbRoot.length > 0) [prefCands addObject:[jbRoot stringByAppendingString:prefsRel]];
+        [prefCands addObject:prefsRel];
+        [prefCands addObject:[@"/var/jb" stringByAppendingString:prefsRel]];
+        NSString *prefsPath = nil;
+        for (NSString *c in prefCands) {
+            if ([fm fileExistsAtPath:c]) { prefsPath = c; break; }
+        }
+        if (prefsPath == nil) prefsPath = prefCands.firstObject;
+
+        int maxPct = getLocalInt(@"jy_max_percent", 80);
+        int apple = 80;
+        if (maxPct >= 98)      apple = 100;
+        else if (maxPct >= 93) apple = 95;
+        else if (maxPct >= 88) apple = 90;
+        else if (maxPct >= 83) apple = 85;
+
+        NSMutableDictionary *prefs = [[NSDictionary dictionaryWithContentsOfFile:prefsPath] mutableCopy];
+        if (prefs == nil) prefs = [NSMutableDictionary dictionary];
+        prefs[@"batteryEstimateTargetPercent"] = @(maxPct);
+        prefs[@"batteryEstimateAppleTargetPercent"] = @(apple);
+        [fm createDirectoryAtPath:[prefsPath stringByDeletingLastPathComponent]
+      withIntermediateDirectories:YES attributes:nil error:nil];
+        BOOL wrote = [prefs writeToFile:prefsPath atomically:YES];
+        if (wrote) {
+            // 偏好文件归 mobile 所有，否则 Jikan（以 mobile 运行）自己改设置会失败。
+            chown(prefsPath.fileSystemRepresentation, 501, 501);
+            chmod(prefsPath.fileSystemRepresentation, 0644);
+            CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                                 CFSTR("moe.waru.jikan.preferences.reload"),
+                                                 NULL, NULL, true);
+        }
+        return @{ @"status": @(wrote ? 0 : -1),
+                  @"data": @{ @"installed": @(found != nil),
+                              @"found": found ?: @"",
+                              @"prefs_path": prefsPath ?: @"",
+                              @"wrote": @(wrote),
+                              @"max": @(maxPct),
+                              @"jbroot": jbRoot } };
     } else if ([api isEqualToString:@"get_conf"]) {
         NSString* key = nsreq[@"key"];
         if (key == nil) {
