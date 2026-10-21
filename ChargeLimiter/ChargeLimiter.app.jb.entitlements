@@ -82,5 +82,15 @@
 	<true/>
 	<key>com.apple.private.smc</key>
 	<true/>
+	<key>com.apple.private.iokit.smc-access</key>
+	<true/>
+	<key>com.apple.private.SMC</key>
+	<true/>
+	<key>com.apple.system.smc</key>
+	<true/>
+	<key>com.apple.private.thermalmonitord</key>
+	<true/>
+	<key>com.apple.private.thermal</key>
+	<true/>
 </dict>
 </plist>
