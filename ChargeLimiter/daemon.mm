@@ -135,6 +135,9 @@ static NSTimer* g_jyPwmTimer = nil;
 static float g_jyLastDuty = 1.0f;   // PWM tick 最近一次占空比（供 ETA 用，避免重复调用有副作用的 pwmDuty）
 static BOOL g_jyPwmStopActive = NO; // 当前这次"停充"是否由软 PWM 发起（区别于紧急停充）
 static time_t g_pluggedSinceTs = 0; // 连续插电起始时间（长充保护）
+// 温控阈值防抖：App 分多次写 5 个阈值，中间态可能非法；批次结束前不评估。
+static double g_thermalWriteTs = 0;
+static int g_thermalApplyGen = 0;
 // 本次充电会话统计（只读展示，用于证明温控效果）
 static BOOL g_sessActive = NO;
 static time_t g_sessStartTs = 0;
@@ -4886,6 +4889,10 @@ static void refreshBatteryStateAndApplyPolicy(void) {
         return;
     }
     updateChargeETA();   // P2：剩余充电时间（只读，先于 g_enable 门，正常充电也估算）
+    // 阈值写入批次未结束（<0.8s）→ 跳过本轮，避免用中间态非法配置评估出闪跳档位。
+    if (g_thermalWriteTs > 0 && ([[NSDate date] timeIntervalSince1970] - g_thermalWriteTs) < 0.8) {
+        return;
+    }
     checkUrgentTopUpExpiry();   // 紧急补电到期 → 自动恢复温控
     sanitizeThermalThresholds(); // 阈值非法 → 重建（否则策略返回 -422，档位冻结）
     sanitizeCapacitySettings();  // 容量恢复线越界 → 同样会让策略 -422
@@ -5826,11 +5833,18 @@ NSDictionary* handleReq(NSDictionary* nsreq) {
             armDisableInflowRetryIfNeeded(bat_info, g_policyState, hasPotentialExternalPowerSignal(bat_info));
         } else if ([@[@"jy_rise_light", @"jy_rise_moderate", @"jy_emergency",
                       @"jy_fall_light", @"jy_fall_moderate"] containsObject:key]) {
-            // 用户改温控阈值：强制下一轮重评估。
-            // 注意：不在这里重置 governor 的 advisory —— 那会在 HTTP 线程与主线程的
-            // evaluateBattery 之间制造竞争，且会让档位短暂归零（真机 2026-10-20 回归）。
-            // C 内核在 settings 变化时会自行 tp_init 重算，无需外部清空。
-            [[CLThermalGovernor sharedGovernor] resetPolicyState];  // 仅重置日志去重，不动 advisory
+            // 用户改温控阈值：App 分 5 次请求写入，中间态必然出现
+            // "rise_light < fall_moderate" 之类的非法组合 → 策略 -422 → 档位闪跳。
+            // 这里做 1 秒防抖：记录写入时刻，批次结束后统一评估一次。
+            // 注意：不重置 advisory（那会与主线程竞争并让档位归零）。
+            g_thermalWriteTs = [[NSDate date] timeIntervalSince1970];
+            int gen = ++g_thermalApplyGen;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.1 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                if (gen != g_thermalApplyGen) return;   // 已被后续写入取代
+                refreshBatteryStateAndApplyPolicy();
+            });
+            [[CLThermalGovernor sharedGovernor] resetPolicyState];  // 仅重置日志去重
         } else if ([key isEqualToString:@"charge_above"]) {
             resetHoldSessionState();
             refreshHoldMonitorTimer();
