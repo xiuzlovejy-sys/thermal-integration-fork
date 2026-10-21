@@ -155,6 +155,8 @@ static int g_sessLastCycles = 0;
 // P2 剩余充电时间估算（只读，不干预控制）：滑动窗口采样。
 static NSMutableArray* g_etaAmpSamples = nil;  // 充电相电流样本（mA）
 static NSTimeInterval g_etaLastChargingTs = 0; // 最近一次"确实在充"的时间
+static double g_etaDeadlineTs = 0;             // 预计完成时刻（绝对时间戳，用于连续倒计时）
+static NSMutableArray* g_etaCapSamples = nil;  // 长窗口容量样本 @{t, mah}（30 分钟，用于偏差校正）
 static NSString* g_etaState = @"unplugged";   // unplugged/paused/charging/at_target/estimating/no_data
 static NSInteger g_etaMinutes = -1;           // -1 = 无有效估算
 static NSString* g_etaConfidence = @"low";
@@ -4931,9 +4933,8 @@ static void evaluateFullChargeSchedule(BOOL forceApply) {
 }
 
 // P2 剩余充电时间估算（只读，不干预充电控制）。
-// 核心：用 AppleRawCurrentCapacity（mAh 高精度，规避 1% SOC 阶梯噪声）的滑动窗口
-// 实测变化率做外推——天然吸收软 PWM 占空比、CC-CV taper、温度限流等一切减速因素，
-// 无需对充电曲线建模。只在"充电相位"（电流 > 100mA）采样，停充相位不污染。
+// 速率 = 充相电流 × 占空比（逐点积分）+ 长窗口容量差校正；
+// 显示用"绝对完成时刻"倒计时，因此 PWM 停相时时间仍会继续递减，不会消失。
 static void updateChargeETA(void) {
     NSDictionary *safe = bat_info ?: @{};
     BOOL external = [safe[@"ExternalConnected"] boolValue];
@@ -4945,9 +4946,12 @@ static void updateChargeETA(void) {
 
     if (!external || rawCurObj == nil || rawMaxObj == nil) {
         if (g_etaAmpSamples == nil) g_etaAmpSamples = [NSMutableArray array];
+        if (g_etaCapSamples == nil) g_etaCapSamples = [NSMutableArray array];
         [g_etaAmpSamples removeAllObjects];
+        [g_etaCapSamples removeAllObjects];
         g_etaMinutes = -1;
         g_etaLastChargingTs = 0;
+        g_etaDeadlineTs = 0;
         g_etaState = !external ? @"unplugged" : @"no_data";
         return;
     }
@@ -4957,19 +4961,30 @@ static void updateChargeETA(void) {
 
     double socPct = rawCur / rawMax * 100.0;
     double remainMah = rawMax * targetPct / 100.0 - rawCur;
-
-    // 已达目标电量
-    if (remainMah <= 0) { g_etaMinutes = 0; g_etaState = @"at_target"; g_etaConfidence = @"high"; return; }
-
     NSTimeInterval nowTs = [[NSDate date] timeIntervalSince1970];
 
-    // 未在充电（软 PWM 停充相位 / 紧急停充 / 容量停充）：
-    // 只有"持续 >15s 不在充"才显示暂停；PWM 的 10s 级停充相位不打断 ETA，避免界面闪烁。
+    // 已达目标电量
+    if (remainMah <= 0) {
+        g_etaMinutes = 0;
+        g_etaDeadlineTs = 0;
+        g_etaState = @"at_target";
+        g_etaConfidence = @"high";
+        return;
+    }
+
+    // 未在充电相：用"绝对完成时刻"继续倒计时。
+    // PWM 软停相只是降功率，不是暂停充电——绝不能把时间藏起来。
+    BOOL inSoftStop = (!charging || amp <= 100) && g_jyPwmStopActive;
     if (!charging || amp <= 100) {
-        if (g_etaLastChargingTs > 0 && (nowTs - g_etaLastChargingTs) < 15.0 && g_etaMinutes > 0) {
-            return;   // 短暂停相位：保留上一次估算
+        BOOL deadlineValid = g_etaDeadlineTs > nowTs;
+        BOOL recent = g_etaLastChargingTs > 0 && (nowTs - g_etaLastChargingTs) < 60.0;
+        if (deadlineValid && (inSoftStop || recent)) {
+            g_etaMinutes = MAX(1, (NSInteger)lround((g_etaDeadlineTs - nowTs) / 60.0));
+            g_etaState = @"charging";   // 软停相保持"充电中"
+            return;
         }
         g_etaMinutes = -1;
+        g_etaDeadlineTs = 0;
         g_etaState = @"paused";
         return;
     }
@@ -4981,8 +4996,16 @@ static void updateChargeETA(void) {
     // 那样等于用"现在的占空比"去解释"过去的电流"，ETA 会偏。
     float duty = (g_jyLastDuty > 0.02f && g_jyLastDuty <= 1.0f) ? g_jyLastDuty : 1.0f;
     if (g_etaAmpSamples == nil) g_etaAmpSamples = [NSMutableArray array];
+    if (g_etaCapSamples == nil) g_etaCapSamples = [NSMutableArray array];
     [g_etaAmpSamples addObject:@((double)amp * (double)duty)];
     while (g_etaAmpSamples.count > 24) [g_etaAmpSamples removeObjectAtIndex:0];   // 约 6 分钟（15s/次）
+
+    // 长窗口容量样本（保留 30 分钟）：用于校正电流法的系统偏差。
+    [g_etaCapSamples addObject:@{@"t": @(nowTs), @"mah": @(rawCur)}];
+    while (g_etaCapSamples.count > 2 &&
+           (nowTs - [g_etaCapSamples.firstObject[@"t"] doubleValue]) > 1800.0) {
+        [g_etaCapSamples removeObjectAtIndex:0];
+    }
 
     double effSum = 0;
     for (NSNumber *v in g_etaAmpSamples) effSum += [v doubleValue];
@@ -4991,6 +5014,22 @@ static void updateChargeETA(void) {
     // 有效平均速率（mAh/min）= 有效平均电流 ÷ 60
     double rateMahPerMin = avgEffAmp / 60.0;
 
+    // 容量差校正：天然包含 CV taper、占空比变化、系统负载的全部影响。
+    // 只在窗口 ≥10 分钟且确实有增长时采用，权重 30%，避开 1% 阶梯量化噪声。
+    if (g_etaCapSamples.count >= 3) {
+        NSDictionary *first = g_etaCapSamples.firstObject;
+        NSDictionary *last = g_etaCapSamples.lastObject;
+        double winMin = ([last[@"t"] doubleValue] - [first[@"t"] doubleValue]) / 60.0;
+        double deltaMah = [last[@"mah"] doubleValue] - [first[@"mah"] doubleValue];
+        if (winMin >= 10.0 && deltaMah > 0) {
+            double rateLong = deltaMah / winMin;
+            if (rateLong > 0.2 && rateLong < 20.0) {
+                double blended = rateMahPerMin * 0.7 + rateLong * 0.3;
+                if (blended > 0) rateMahPerMin = blended;
+            }
+        }
+    }
+
     if (rateMahPerMin <= 0.3) {
         g_etaMinutes = -1;
         g_etaState = @"estimating";
@@ -4998,16 +5037,17 @@ static void updateChargeETA(void) {
         return;
     }
 
-    NSInteger eta = (NSInteger)lround(remainMah / rateMahPerMin);
-    if (eta < 1) eta = 1;
-    // 显示平滑：PWM 与 15s 采样会让原始估计跳变；向旧值收敛 35% 即可稳住界面，
-    // 又不会长期偏离（每轮都会重新逼近真实值）。
-    if (g_etaMinutes > 0 && labs((long)(eta - g_etaMinutes)) < 60) {
-        eta = (NSInteger)lround(0.65 * (double)eta + 0.35 * (double)g_etaMinutes);
+    double remainSec = remainMah / rateMahPerMin * 60.0;
+    double deadline = nowTs + remainSec;
+    // 时间轴平滑：与旧 deadline 混合 35%，抑制单轮抖动；差异 >30 分钟视为模型跳变，直接采纳。
+    if (g_etaDeadlineTs > nowTs && fabs(deadline - g_etaDeadlineTs) < 1800.0) {
+        deadline = g_etaDeadlineTs * 0.35 + deadline * 0.65;
     }
-    g_etaMinutes = eta;
+    g_etaDeadlineTs = deadline;
+    g_etaMinutes = MAX(1, (NSInteger)lround((deadline - nowTs) / 60.0));
+
     // 高 SOC 段电流会继续 taper，ETA 天然偏低；降置信度提示。
-    g_etaConfidence = (socPct > 80 || g_etaAmpSamples.count < 4) ? @"medium" : @"high";
+    g_etaConfidence = (socPct > 85 || g_etaAmpSamples.count < 4) ? @"medium" : @"high";
     g_etaState = @"charging";
 }
 
