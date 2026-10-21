@@ -18,6 +18,7 @@ int main(int argc, char** argv) {
 #include <os/lock.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <sys/codesign.h>
 #include <errno.h>
 #import <Foundation/Foundation.h>
 #import <UserNotifications/UserNotifications.h>
@@ -5974,6 +5975,53 @@ static NSString* CLSMCUserClientProbe(void) {
     return out;
 }
 
+
+// 连接类型 × 选择器 2 组合扫描：定位 SMC 读键的正确 (type, selector)。
+static NSString* CLSMCTypeSweep(void) {
+    NSMutableString *out = [NSMutableString string];
+    io_service_t svc = IOServiceGetMatchingService(kIOMasterPortDefault, IOServiceMatching("AppleSMC"));
+    if (svc == IO_OBJECT_NULL) { [out appendString:@"AppleSMC 未找到\n"]; return out; }
+    for (int type = 0; type <= 2; type++) {
+        io_connect_t conn = 0;
+        kern_return_t okr = IOServiceOpen(svc, mach_task_self(), (uint32_t)type, &conn);
+        if (okr != KERN_SUCCESS) { [out appendFormat:@"type %d open fail 0x%x\n", type, okr]; continue; }
+        for (int sel = 0; sel <= 3; sel++) {
+            CLSMCParam in, outp;
+            size_t outSize = sizeof(outp);
+            memset(&in, 0, sizeof(in));
+            in.key = CLSMCFourCC("#KEY");
+            in.dataSize = 4;
+            in.data8 = 5;
+            memset(&outp, 0, sizeof(outp));
+            kern_return_t kr = IOConnectCallStructMethod(conn, (uint32_t)sel, &in, sizeof(in), &outp, &outSize);
+            uint32_t raw = 0; memcpy(&raw, outp.bytes, 4);
+            [out appendFormat:@"type %d sel %d: kr=0x%x result=%d raw=0x%08x\n", type, sel, kr, outp.result, raw];
+        }
+        IOServiceClose(conn);
+    }
+    IOObjectRelease(svc);
+    return out;
+}
+
+// thermalmonitord 的 entitlements：csops 从内核读，绕过 jbroot 文件路径问题。
+static NSString* CLSMCEntitlementsHex(void) {
+    NSMutableString *out = [NSMutableString string];
+    int pid = get_pid_of("thermalmonitord");
+    if (pid <= 1) { [out appendString:@"thermalmonitord 未找到\n"]; return out; }
+    [out appendFormat:@"thermalmonitord pid=%d entitlements blob (hex):\n", pid];
+    size_t cap = 65536;
+    uint8_t *buf = (uint8_t *)malloc(cap);
+    memset(buf, 0, cap);
+    int r = csops(pid, CS_OPS_ENTITLEMENTS_BLOB, buf, cap);
+    if (r != 0) { [out appendFormat:@"csops 失败 r=%d errno=%d\n", r, errno]; free(buf); return out; }
+    for (int i = 0; i < 4096; i++) {
+        [out appendFormat:@"%02x", buf[i]];
+        if ((i & 15) == 15) [out appendString:@"\n"]; else [out appendString:@" "];
+    }
+    free(buf);
+    return out;
+}
+
 NSDictionary* handleReq(NSDictionary* nsreq) {
     g_lastMasterOffRequestTs = time(0);   // 非驻留形态空闲退出计时（B4）
     syncDaemonDocumentsForRequest(nsreq);
@@ -6455,6 +6503,10 @@ NSDictionary* handleReq(NSDictionary* nsreq) {
         [out appendString:CLSMCProbe()];
         [out appendString:@"\n\n==== user-client 元数据 ====\n"];
         [out appendString:CLSMCUserClientProbe()];
+        [out appendString:@"\n\n==== 连接类型×选择器 ====\n"];
+        [out appendString:CLSMCTypeSweep()];
+        [out appendString:@"\n\n==== thermalmonitord entitlements ====\n"];
+        [out appendString:CLSMCEntitlementsHex()];
         return @{@"status": @0, @"data": @{@"text": out}};
     } else if ([api isEqualToString:@"jy_log_clear"]) {
         [CLThermalGovernor clearLog];
