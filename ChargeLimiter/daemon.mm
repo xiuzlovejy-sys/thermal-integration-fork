@@ -5884,55 +5884,58 @@ static NSString* CLSMCProbe(void) {
     CLSMCParam in, outp;
     size_t outSize = sizeof(outp);
 
-    // 读 #KEY 数量：扫描选择器 0..6，找正确的方法索引 + 看权限门控。
+    // 全面扫描选择器 0..10：每个都读 #KEY，打印 kr/result/原始4字节。
     int count = 0;
-    for (int sel = 0; sel <= 6; sel++) {
+    int goodSelector = -1;
+    for (int sel = 0; sel <= 10; sel++) {
         memset(&in, 0, sizeof(in));
         in.key = CLSMCFourCC("#KEY");
         in.dataSize = 4;
-        in.data8 = 5;   // 读键
+        in.data8 = 5;
         memset(&outp, 0, sizeof(outp));
         outSize = sizeof(outp);
         kr = IOConnectCallStructMethod(conn, (uint32_t)sel, &in, sizeof(in), &outp, &outSize);
-        if (kr == KERN_SUCCESS && outp.result == 0) {
-            uint32_t c = 0;
-            memcpy(&c, outp.bytes, 4);
-            count = (int)CFSwapInt32BigToHost(c);
-            [out appendFormat:@"#KEY via selector %d → 键总数 %d\n", sel, count];
-            break;
+        uint32_t raw = 0;
+        memcpy(&raw, outp.bytes, 4);
+        [out appendFormat:@"sel %d: kr=0x%x result=%d raw=0x%08x\n", sel, kr, outp.result, raw];
+        if (kr == KERN_SUCCESS && outp.result == 0 && raw != 0) {
+            count = (int)CFSwapInt32BigToHost(raw);
+            goodSelector = sel;
         }
-        [out appendFormat:@"selector %d: kr=0x%x result=%d\n", sel, kr, outp.result];
     }
+    [out appendFormat:@"#KEY 计数 = %d (selector %d)\n", count, goodSelector];
 
+    // 不依赖 #KEY：直接按键索引枚举 + 读值，直到键名归零或失败。
     [out appendString:@"--- 键列表 ---\n"];
     int shown = 0;
-    for (int i = 0; i < count && shown < 400; i++) {
+    for (int i = 0; i < 400; i++) {
         memset(&in, 0, sizeof(in));
         in.data32 = (uint32_t)i;
         in.data8 = 8;   // 按键索引取键名
         memset(&outp, 0, sizeof(outp));
         outSize = sizeof(outp);
-        kr = IOConnectCallStructMethod(conn, 2, &in, sizeof(in), &outp, &outSize);
-        if (kr != KERN_SUCCESS || outp.result != 0) continue;
+        kr = IOConnectCallStructMethod(conn, 0, &in, sizeof(in), &outp, &outSize);
+        if (kr != KERN_SUCCESS || outp.result != 0 || outp.key == 0) break;
         NSString *name = CLSMCKeyName(outp.key);
 
         memset(&in, 0, sizeof(in));
         in.key = outp.key;
         in.dataSize = 4;
-        in.data8 = 5;
+        in.data8 = 5;   // 读值
         memset(&outp, 0, sizeof(outp));
         outSize = sizeof(outp);
-        kern_return_t kr2 = IOConnectCallStructMethod(conn, 2, &in, sizeof(in), &outp, &outSize);
+        kern_return_t kr2 = IOConnectCallStructMethod(conn, 0, &in, sizeof(in), &outp, &outSize);
         NSString *val = @"";
         if (kr2 == KERN_SUCCESS && outp.result == 0) {
             uint32_t v = 0; memcpy(&v, outp.bytes, 4);
             val = [NSString stringWithFormat:@"= %u", CFSwapInt32BigToHost(v)];
         } else {
-            val = [NSString stringWithFormat:@"(读失败 kr=0x%x r=%d)", kr2, outp.result];
+            val = [NSString stringWithFormat:@"(kr=0x%x r=%d)", kr2, outp.result];
         }
-        [out appendFormat:@"  %@  %@\n", name, val];
+        [out appendFormat:@"  [%d] %@  %@\n", i, name, val];
         shown++;
     }
+    [out appendFormat:@"--- 枚举 %d 键 ---\n", shown];
     IOServiceClose(conn);
     [out appendFormat:@"--- 枚举 %d/%d ---\n", shown, count];
     return out;
