@@ -5786,10 +5786,11 @@ static BOOL CLJikanSetValue(NSString *key, id val) {
     chown(path.fileSystemRepresentation, 501, 501);
     chmod(path.fileSystemRepresentation, 0644);
     // 直写 plist 绕过 cfprefsd 缓存：胶囊 dylib 用 NSUserDefaults 读，会拿到旧值。
-    // 先杀 cfprefsd 让它丢缓存（自动重启后重读磁盘），再发重载通知让胶囊立即重读。
+    // 必须「阻塞式」杀 cfprefsd——等它真正退出后再发重载通知，否则通知先到，
+    // dylib 读到的仍是垂死的旧 cfprefsd 的缓存（真机 2.0.4 开关无效的根因）。
     {
         pid_t child = 0;
-        spawn(@[@"killall", @"cfprefsd"], nil, nil, &child, SPAWN_FLAG_NOWAIT, nil);
+        spawn(@[@"killall", @"cfprefsd"], nil, nil, &child, 0, nil);
     }
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
                                          CFSTR("moe.waru.jikan.preferences.reload"),
