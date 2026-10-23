@@ -1,0 +1,8 @@
+Package: com.jy.charge.powercuff-loader-test
+Name: Jy's Charge Loader Test
+Version: 0.1.0
+Architecture: iphoneos-arm64e
+Description: Isolated observer loading diagnostics. No automatic execution, system-service injection or charging control.
+Maintainer: Jy's Charge
+Author: Jy's Charge
+Section: Development
