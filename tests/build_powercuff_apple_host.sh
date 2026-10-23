@@ -10,7 +10,7 @@ perl "$THEOS/vendor/logos/bin/logos.pl" -c generator=MobileSubstrate \
     -fobjc-arc -std=c++17 -framework Foundation -DCLPC_TESTING=0 \
     -DCLPC_HOST_TESTING=1 -DCLPC_ENABLE_APPLY=0 -dynamiclib \
     -Wl,-undefined,dynamic_lookup -Wl,-ignore_auto_link \
-    -I"$THEOS/vendor/include" -IPowercuffProbe \
+    -I"$THEOS/vendor/include" -F"$THEOS/vendor/lib" -IPowercuffProbe \
     "$probe_output/CLPowercuffProbe.mm" -x objective-c++ PowercuffProbe/CLPowercuffCore.m \
     -o "$probe_output/observer.dylib" > "$probe_output/observer-build.log" 2>&1
 "$probe_cxx" -target arm64e-apple-ios15.0 -isysroot "$probe_sdk" \
