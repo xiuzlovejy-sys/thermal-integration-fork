@@ -1,0 +1,44 @@
+name: Powercuff Apple native tests
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - powercuff-apple-minimal-validation
+    paths:
+      - .github/workflows/powercuff-apple-native.yml
+      - tests/build_powercuff_apple_native.sh
+      - tests/powercuff_probe_native.mm
+      - PowercuffProbe/CLPowercuffCore.h
+      - PowercuffProbe/CLPowercuffCore.m
+      - PowercuffProbe/CLPowercuffProbe.xm
+
+permissions:
+  contents: read
+
+jobs:
+  cross-build:
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check minimal Objective-C PAC schemas
+        run: |
+          set -euo pipefail
+          CLPC_APPLE_OUTPUT=probe/apple-minimal sh tests/build_powercuff_apple_minimal.sh
+      - name: Prepare Logos and link headers
+        run: |
+          set -euo pipefail
+          probe_theos="$RUNNER_TEMP/powercuff-theos"
+          git clone --depth 1 https://github.com/roothide/theos "$probe_theos"
+          git -C "$probe_theos" submodule update --init --depth 1 vendor/logos vendor/include vendor/lib
+          printf 'THEOS=%s\n' "$probe_theos" >> "$GITHUB_ENV"
+      - name: Cross-build observer and fake receiver tests
+        run: sh tests/build_powercuff_apple_native.sh
+      - name: Preserve diagnostics and device test binaries
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: powercuff-apple-native
+          path: probe/
+          if-no-files-found: warn
