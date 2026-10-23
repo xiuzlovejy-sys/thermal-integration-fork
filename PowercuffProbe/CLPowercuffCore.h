@@ -8,16 +8,22 @@
 #ifndef CLPC_ENABLE_APPLY
 #define CLPC_ENABLE_APPLY 0
 #endif
+#ifndef CLPC_HOST_TESTING
+#define CLPC_HOST_TESTING 0
+#endif
 
 #if CLPC_TESTING
 #define CLPC_REQUEST_NOTIFICATION "com.jy.charge.powercuffprobe.test.request"
 #define CLPC_STATUS_NOTIFICATION "com.jy.charge.powercuffprobe.test.status"
+#elif CLPC_HOST_TESTING
+#define CLPC_REQUEST_NOTIFICATION "com.jy.charge.powercuffprobe.hosttest.request"
+#define CLPC_STATUS_NOTIFICATION "com.jy.charge.powercuffprobe.hosttest.status"
 #else
 #define CLPC_REQUEST_NOTIFICATION "com.jy.charge.powercuffprobe.request"
 #define CLPC_STATUS_NOTIFICATION "com.jy.charge.powercuffprobe.status"
-#if CLPC_ENABLE_APPLY
-#error Production probe must remain observer-only
 #endif
+#if !CLPC_TESTING && CLPC_ENABLE_APPLY
+#error Production probe must remain observer-only
 #endif
 
 typedef NS_ENUM(uint8_t, CLPCResult) {

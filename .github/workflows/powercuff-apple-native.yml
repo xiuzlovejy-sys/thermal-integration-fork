@@ -9,9 +9,12 @@ on:
       - .github/workflows/powercuff-apple-native.yml
       - tests/build_powercuff_apple_native.sh
       - tests/powercuff_probe_native.mm
+      - tests/powercuff_probe_host.mm
+      - tests/build_powercuff_apple_host.sh
       - PowercuffProbe/CLPowercuffCore.h
       - PowercuffProbe/CLPowercuffCore.m
       - PowercuffProbe/CLPowercuffProbe.xm
+      - PowercuffProbe/CLPowercuffProbeCtl.m
 
 permissions:
   contents: read
@@ -35,6 +38,8 @@ jobs:
           printf 'THEOS=%s\n' "$probe_theos" >> "$GITHUB_ENV"
       - name: Cross-build observer and fake receiver tests
         run: sh tests/build_powercuff_apple_native.sh
+      - name: Cross-build production-entry host tests
+        run: sh tests/build_powercuff_apple_host.sh
       - name: Preserve diagnostics and device test binaries
         if: always()
         uses: actions/upload-artifact@v4
