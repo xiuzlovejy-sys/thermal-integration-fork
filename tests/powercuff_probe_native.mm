@@ -4,6 +4,17 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <dlfcn.h>
+
+#ifndef CLPC_REAL_HOOK
+#define CLPC_REAL_HOOK 0
+#endif
+
+#if CLPC_REAL_HOOK
+static void *HookLibrary;
+static void (*HookMessage)(Class, SEL, IMP, IMP *);
+static unsigned int HookInstallCalls;
+#endif
 
 static NSUInteger OriginalCalls;
 static NSUInteger BaseDeallocations;
@@ -89,10 +100,31 @@ static void CreateClasses(void) {
 }
 
 extern "C" void MSHookMessageEx(Class target, SEL selector, IMP replacement, IMP *original) {
+#if CLPC_REAL_HOOK
+    Check(HookMessage != NULL, "real hook function resolved before installation");
+    HookInstallCalls++;
+    HookMessage(target, selector, replacement, original);
+#else
     Method method = class_getInstanceMethod(target, selector);
     *original = method_getImplementation(method);
     class_replaceMethod(target, selector, replacement, method_getTypeEncoding(method));
+#endif
 }
+
+#if CLPC_REAL_HOOK
+static void LoadRealHook(const char *path) {
+    HookLibrary = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+    if (HookLibrary == NULL) fprintf(stderr, "Framework load failed: %s\n", dlerror());
+    Check(HookLibrary != NULL, "real hook framework loads");
+    HookMessage = (void (*)(Class, SEL, IMP, IMP *))dlsym(HookLibrary, "MSHookMessageEx");
+    Check(HookMessage != NULL && HookMessage != &MSHookMessageEx,
+        "framework hook resolves without falling back to test bridge");
+    Dl_info location = {};
+    Check(dladdr((const void *)HookMessage, &location) != 0 && location.dli_fname != NULL,
+        "resolved hook has library provenance");
+    printf("Real hook provider: %s\n", location.dli_fname);
+}
+#endif
 
 static id DummyMethod(id object, SEL selector, id value) { return value; }
 
@@ -137,6 +169,9 @@ static void Tests(void) {
         Check(CLPCInstallClass(CommonClass), "repeat install accepted");
         Check(class_getMethodImplementation(CommonClass, @selector(initProduct:)) == installed,
             "repeat install does not replace hook again");
+#if CLPC_REAL_HOOK
+        Check(HookInstallCalls == 1, "real framework installs exactly once");
+#endif
     });
     OnMain(^{});
     Check(CLPCReadState().requests == 0, "startup does not replay mode");
@@ -223,11 +258,20 @@ static void Tests(void) {
         Check(WeakOwner == nil && BaseDeallocations == 4, "unsupported result is not retained after rejection");
     });
     Check(!ReenteredInit, "no thermal call reenters initializer caller");
-    printf("PASS %u native Powercuff probe assertions (test_apply=%d)\n", Assertions, CLPC_ENABLE_APPLY);
+    printf("PASS %u native Powercuff probe assertions (test_apply=%d, hook=%s)\n",
+        Assertions, CLPC_ENABLE_APPLY, CLPC_REAL_HOOK ? "real" : "stub");
     exit(0);
 }
 
-int main(void) {
+int main(int argc, const char *argv[]) {
+    alarm(30);
+#if CLPC_REAL_HOOK
+    if (argc != 2) {
+        fprintf(stderr, "Usage: %s /absolute/path/to/hook-framework\n", argv[0]);
+        return 2;
+    }
+    LoadRealHook(argv[1]);
+#endif
     CreateClasses();
     CLPCStartObserver();
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
