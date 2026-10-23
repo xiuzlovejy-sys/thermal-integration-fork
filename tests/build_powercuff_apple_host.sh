@@ -22,4 +22,15 @@ perl "$THEOS/vendor/logos/bin/logos.pl" -c generator=MobileSubstrate \
     -DCLPC_HOST_TESTING=1 -DCLPC_ENABLE_APPLY=0 \
     PowercuffProbe/CLPowercuffProbeCtl.m -o "$probe_output/controller" \
     > "$probe_output/controller-build.log" 2>&1
+for probe_static in 0 1; do
+    "$probe_cxx" -target arm64e-apple-ios15.0 -isysroot "$probe_sdk" \
+        -fobjc-arc -std=c++17 -framework Foundation -DCLPC_TESTING=0 \
+        -DCLPC_HOST_TESTING=1 -DCLPC_ENABLE_APPLY=0 \
+        -DCLPC_LINKED_HOST=1 -DCLPC_STATIC_HOST="$probe_static" \
+        -Wl,-ignore_auto_link -I"$THEOS/vendor/include" -F"$THEOS/vendor/lib" -IPowercuffProbe \
+        tests/powercuff_probe_host.mm "$probe_output/CLPowercuffProbe.mm" \
+        -x objective-c++ PowercuffProbe/CLPowercuffCore.m \
+        -o "$probe_output/host-linked-$probe_static" \
+        > "$probe_output/linked-$probe_static-build.log" 2>&1
+done
 printf 'Built production-entry observer, host and controller; not signed or executed\n'

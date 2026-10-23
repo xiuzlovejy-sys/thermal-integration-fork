@@ -19,6 +19,13 @@ static unsigned int Assertions;
 static void *Framework;
 static void *Observer;
 
+#ifndef CLPC_LINKED_HOST
+#define CLPC_LINKED_HOST 0
+#endif
+#ifndef CLPC_STATIC_HOST
+#define CLPC_STATIC_HOST 0
+#endif
+
 static void Check(BOOL valid, const char *name) {
     Assertions++;
     if (!valid) {
@@ -43,7 +50,27 @@ static void Apply(id object, SEL selector, id mode) {
     ThermalCalls++;
 }
 
+#if CLPC_STATIC_HOST
+@interface CommonProduct : NSObject
+@end
+@implementation CommonProduct
+- (id)initProduct:(id)data { return Initializer(self, _cmd, data); }
+- (void)putDeviceInThermalSimulationMode:(id)mode { Apply(self, _cmd, mode); }
+@end
+
+static __attribute__((constructor(101))) void Preinitialize(void) {
+    const char *scenario = getenv("CLPC_HOST_SCENARIO");
+    if (scenario != NULL && strcmp(scenario, "early") == 0) {
+        Owner = [[CommonProduct alloc] initProduct:@"before-hook"];
+    }
+}
+#endif
+
 static void CreateClass(void) {
+#if CLPC_STATIC_HOST
+    ProductClass = objc_getClass("CommonProduct");
+    Check(ProductClass != Nil, "static host fake class exists");
+#else
     ProductClass = objc_allocateClassPair([NSObject class], "CommonProduct", 0);
     Check(ProductClass != Nil, "host creates its own fake class");
     Check(class_addMethod(ProductClass, sel_registerName("initProduct:"), (IMP)Initializer, "@@:@"),
@@ -51,7 +78,35 @@ static void CreateClass(void) {
     Check(class_addMethod(ProductClass, sel_registerName("putDeviceInThermalSimulationMode:"),
         (IMP)Apply, "v@:@"), "host adds counting-only fake thermal method");
     objc_registerClassPair(ProductClass);
+#endif
 }
+
+#if CLPC_LINKED_HOST
+extern "C" void MSHookMessageEx(Class target, SEL selector, IMP replacement, IMP *original) {
+    static void (*hook)(Class, SEL, IMP, IMP *);
+    if (hook == NULL) {
+        const char *path = getenv("CLPC_HOOK_FRAMEWORK");
+        if (path == NULL) {
+            fprintf(stderr, "Missing CLPC_HOOK_FRAMEWORK before constructor\n");
+            exit(2);
+        }
+        Framework = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+        if (Framework == NULL) {
+            fprintf(stderr, "Constructor framework load: %s\n", dlerror());
+            exit(1);
+        }
+        hook = (void (*)(Class, SEL, IMP, IMP *))dlsym(Framework, "MSHookMessageEx");
+        if (hook == NULL || hook == &MSHookMessageEx) {
+            fprintf(stderr, "Constructor real hook lookup failed\n");
+            exit(1);
+        }
+        Dl_info provider = {};
+        if (dladdr((const void *)hook, &provider) == 0 || provider.dli_fname == NULL) exit(1);
+        printf("Constructor hook provider: %s\n", provider.dli_fname);
+    }
+    hook(target, selector, replacement, original);
+}
+#endif
 
 static void OnMain(dispatch_block_t block) {
     dispatch_sync(dispatch_get_main_queue(), ^{
@@ -178,8 +233,13 @@ int main(int argc, const char *argv[]) {
         fprintf(stderr, "Usage: host framework observer controller immediate|delayed|early|absent\n");
         return 2;
     }
+#if CLPC_LINKED_HOST
+    if ((CLPC_STATIC_HOST && strcmp(argv[4], "immediate") != 0 && strcmp(argv[4], "early") != 0) ||
+        (!CLPC_STATIC_HOST && strcmp(argv[4], "delayed") != 0 && strcmp(argv[4], "absent") != 0)) return 2;
+#endif
     @autoreleasepool {
         if (strcmp(argv[4], "immediate") == 0 || strcmp(argv[4], "early") == 0) CreateClass();
+#if !CLPC_LINKED_HOST
         if (strcmp(argv[4], "early") == 0) Owner = [[(id)ProductClass alloc] initProduct:@"before-hook"];
         Framework = dlopen(argv[1], RTLD_NOW | RTLD_GLOBAL);
         if (Framework == NULL) fprintf(stderr, "Framework load: %s\n", dlerror());
@@ -194,6 +254,12 @@ int main(int argc, const char *argv[]) {
         Check(Observer != NULL, "host loads observer and runs production constructor");
         ReadState = (CLPCState (*)(void))dlsym(Observer, "CLPCReadState");
         Check(ReadState != NULL, "host resolves state reader");
+#else
+        ReadState = &CLPCReadState;
+        if (strcmp(argv[4], "early") == 0) {
+            Check(Initializers == 1, "early initialization precedes production hook");
+        }
+#endif
         if (strcmp(argv[4], "delayed") == 0) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 500 * NSEC_PER_MSEC),
                 dispatch_get_main_queue(), ^{ CreateClass(); });
